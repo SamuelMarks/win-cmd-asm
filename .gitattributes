@@ -1,0 +1,236 @@
+# ==============================================================================
+# win-cmd-asm — Extensive Line-Ending, Binary Safety & Diff .gitattributes
+# ==============================================================================
+# Default: treat text files with normalized LF line endings in index & worktree.
+* text=auto eol=lf
+
+# ------------------------------------------------------------------------------
+# 1. Binary Executables, Object Files, Libraries, Disk Images & Archives
+#    (Declared first so specific text exceptions like CONFIG.SYS can override.)
+# ------------------------------------------------------------------------------
+*.bin     binary
+*.BIN     binary
+*.com     binary
+*.COM     binary
+*.exe     binary
+*.EXE     binary
+*.dll     binary
+*.DLL     binary
+*.so      binary
+*.dylib   binary
+*.sys     binary
+*.SYS     binary
+*.drv     binary
+*.DRV     binary
+*.vxd     binary
+*.VXD     binary
+*.386     binary
+*.ovl     binary
+*.OVL     binary
+*.ovr     binary
+*.OVR     binary
+*.pif     binary
+*.PIF     binary
+*.scr     binary
+*.SCR     binary
+*.cpl     binary
+*.CPL     binary
+*.ocx     binary
+*.OCX     binary
+*.efi     binary
+*.EFI     binary
+*.rom     binary
+*.ROM     binary
+*.elf     binary
+*.ELF     binary
+*.o       binary
+*.O       binary
+*.obj     binary
+*.OBJ     binary
+*.omf     binary
+*.OMF     binary
+*.a       binary
+*.lib     binary
+*.LIB     binary
+*.exp     binary
+*.EXP     binary
+*.res     binary
+*.RES     binary
+*.pch     binary
+*.pdb     binary
+*.PDB     binary
+*.ilk     binary
+*.ILK     binary
+*.dbg     binary
+*.DBG     binary
+*.sym     binary
+*.SYM     binary
+*.msg     binary
+*.MSG     binary
+*.bsc     binary
+*.sbr     binary
+
+# Disk / Floppy / VM Images
+*.img     binary
+*.IMG     binary
+*.ima     binary
+*.IMA     binary
+*.flp     binary
+*.FLP     binary
+*.vfd     binary
+*.VFD     binary
+*.dsk     binary
+*.DSK     binary
+*.iso     binary
+*.ISO     binary
+*.vhd     binary
+*.vhdx    binary
+*.vmdk    binary
+*.vdi     binary
+*.qcow    binary
+*.qcow2   binary
+*.dmg     binary
+
+# Graphics, Icons, Cursors, Fonts & Documents
+*.ico     binary
+*.ICO     binary
+*.cur     binary
+*.CUR     binary
+*.bmp     binary
+*.BMP     binary
+*.png     binary
+*.PNG     binary
+*.jpg     binary
+*.JPG     binary
+*.jpeg    binary
+*.JPEG    binary
+*.gif     binary
+*.GIF     binary
+*.webp    binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.otf     binary
+*.fon     binary
+*.fnt     binary
+*.pdf     binary
+
+# Compressed Archives & Installers
+*.zip     binary
+*.ZIP     binary
+*.gz      binary
+*.tgz     binary
+*.bz2     binary
+*.xz      binary
+*.zst     binary
+*.7z      binary
+*.cab     binary
+*.msi     binary
+*.rar     binary
+*.tar     binary
+*.arj     binary
+*.lzh     binary
+
+# ------------------------------------------------------------------------------
+# 2. Multi-ISA Assembly Sources, Headers & Linker Definitions (Strict LF)
+# ------------------------------------------------------------------------------
+*.asm     text eol=lf linguist-language=Assembly
+*.ASM     text eol=lf linguist-language=Assembly
+*.inc     text eol=lf linguist-language=Assembly
+*.INC     text eol=lf linguist-language=Assembly
+*.mac     text eol=lf linguist-language=Assembly
+*.MAC     text eol=lf linguist-language=Assembly
+*.s       text eol=lf linguist-language=Assembly
+*.S       text eol=lf linguist-language=Assembly
+*.def     text eol=lf
+*.DEF     text eol=lf
+*.ld      text eol=lf
+*.lds     text eol=lf
+
+# ------------------------------------------------------------------------------
+# 3. MS-DOS, Win16 & Windows Batch, Command, Registry & MSBuild (Strict CRLF)
+#    MS-DOS COMMAND.COM & Windows CMD.EXE require CRLF for byte-offset seeking.
+# ------------------------------------------------------------------------------
+*.bat              text eol=crlf linguist-language=Batchfile
+*.BAT              text eol=crlf linguist-language=Batchfile
+*.cmd              text eol=crlf linguist-language=Batchfile
+*.CMD              text eol=crlf linguist-language=Batchfile
+*.btm              text eol=crlf linguist-language=Batchfile
+*.BTM              text eol=crlf linguist-language=Batchfile
+AUTOEXEC.BAT       text eol=crlf linguist-language=Batchfile
+autoexec.bat       text eol=crlf linguist-language=Batchfile
+CONFIG.SYS         text eol=crlf
+config.sys         text eol=crlf
+*.reg              text eol=crlf
+*.REG              text eol=crlf
+*.inf              text eol=crlf
+*.INF              text eol=crlf
+*.ini              text eol=crlf
+*.INI              text eol=crlf
+*.rc               text eol=crlf
+*.RC               text eol=crlf
+*.dlg              text eol=crlf
+*.DLG              text eol=crlf
+*.mc               text eol=crlf
+*.MC               text eol=crlf
+*.ps1              text eol=crlf
+*.psm1             text eol=crlf
+*.psd1             text eol=crlf
+*.vbs              text eol=crlf
+*.VBS              text eol=crlf
+*.wsf              text eol=crlf
+*.WSF              text eol=crlf
+*.sln              text eol=crlf
+*.vcxproj          text eol=crlf
+*.vcxproj.filters  text eol=crlf
+*.props            text eol=crlf
+*.targets          text eol=crlf
+
+# ------------------------------------------------------------------------------
+# 4. Rust Host Tooling, C/C++, POSIX Shell, Makefiles & Git Hooks (Strict LF)
+# ------------------------------------------------------------------------------
+*.rs                       text eol=lf diff=rust linguist-language=Rust
+*.toml                     text eol=lf
+Cargo.lock                 text eol=lf
+*.c                        text eol=lf diff=cpp
+*.h                        text eol=lf diff=cpp
+*.cpp                      text eol=lf diff=cpp
+*.hpp                      text eol=lf diff=cpp
+*.cc                       text eol=lf diff=cpp
+*.cxx                      text eol=lf diff=cpp
+*.sh                       text eol=lf linguist-language=Shell
+*.bash                     text eol=lf linguist-language=Shell
+*.zsh                      text eol=lf linguist-language=Shell
+*.awk                      text eol=lf
+*.sed                      text eol=lf
+Makefile                   text eol=lf
+GNUmakefile                text eol=lf
+makefile                   text eol=lf
+*.mk                       text eol=lf
+.githooks/*                text eol=lf linguist-language=Shell
+.githooks/*.cmd            text eol=crlf linguist-language=Batchfile
+.githooks/*.bat            text eol=crlf linguist-language=Batchfile
+
+# ------------------------------------------------------------------------------
+# 5. Documentation, Structured Data & Repository Dotfiles (Strict LF)
+# ------------------------------------------------------------------------------
+*.md              text eol=lf diff=markdown
+*.markdown        text eol=lf diff=markdown
+*.txt             text eol=lf
+*.rst             text eol=lf
+*.adoc            text eol=lf
+*.json            text eol=lf
+*.yaml            text eol=lf
+*.yml             text eol=lf
+*.xml             text eol=lf
+*.manifest        text eol=lf
+*.svg             text eol=lf
+*.html            text eol=lf diff=html
+*.css             text eol=lf diff=css
+*.js              text eol=lf
+*.ts              text eol=lf
+.gitignore        text eol=lf
+.gitattributes    text eol=lf
+.editorconfig     text eol=lf
+LICENSE*          text eol=lf
+NOTICE*           text eol=lf

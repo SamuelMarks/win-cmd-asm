@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "tools/wincmd-diag",
+    "tools/asm-conv",
+    "tools/asm-lint",
+    "tools/emu-cov",
+    "tools/diff-fuzz",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+derive_more = { version = "2.0", features = ["display", "error", "from"] }
+wincmd-diag = { path = "tools/wincmd-diag" }
+asm-conv = { path = "tools/asm-conv" }
+emu-cov = { path = "tools/emu-cov" }
+
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_code = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

@@ -1,0 +1,12 @@
+[package]
+name = "wincmd-diag"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unified derive_more error enum, source spans, and canonical ERR_* codes for win-cmd-asm tools."
+
+[dependencies]
+derive_more.workspace = true
+
+[lints]
+workspace = true

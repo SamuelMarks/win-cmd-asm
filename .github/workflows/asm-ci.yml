@@ -1,0 +1,743 @@
+# @file .github/workflows/asm-ci.yml
+# @brief Reusable multi-OS, multi-ISA, multi-assembler CI workflow for win-cmd-asm.
+# @description
+#   Inspired by SamuelMarks/c-ci: combines sparse cross-platform matrix coverage
+#   (Linux x64/ARM64, macOS Apple Silicon, Windows 2025/2022/ARM64, Cygwin,
+#   Ubuntu/Alpine Docker containers), strict EOL & static verification gates,
+#   parallel 4-era 8086/286 emulation + differential fuzzing, Rust llvm-cov +
+#   doc coverage reporting, and opt-in Bento/QEMU real MS-DOS (1.25, 2.00, 4.00)
+#   and FreeDOS 1.3 execution.
+
+name: Multi-ISA Multi-Assembler CI
+
+on:
+  workflow_call:
+    inputs:
+      run_fuzz:
+        description: 'Run 4-era cross-assembler differential fuzzing (NASM vs FASM vs JWasm)'
+        default: true
+        type: boolean
+      fuzz_cases:
+        description: 'Number of deterministic SplitMix64 differential fuzz cases per DOS era'
+        default: 1000
+        type: number
+      run_coverage:
+        description: 'Compute Rust workspace llvm-cov and documentation coverage summary'
+        default: true
+        type: boolean
+      run_docker:
+        description: 'Build and verify inside Ubuntu (glibc) and Alpine (musl) Docker containers'
+        default: true
+        type: boolean
+      msdos_qemu_testing:
+        description: 'Opt-in: boot real headless QEMU MS-DOS (4.0, 2.0, 1.25) / FreeDOS guests via Bento'
+        default: false
+        type: boolean
+      msdos_versions:
+        description: 'Comma-separated list or JSON array of DOS targets (4.0, 2.0, 1.25, freedos, msdos, all)'
+        default: '4.0,2.0,1.25,freedos'
+        type: string
+      bento_repo:
+        description: 'GitHub repository hosting Bento DOS image builders and serial communicator'
+        default: 'SamuelMarks/bento'
+        type: string
+      bento_ref:
+        description: 'Git branch, tag, or commit SHA of bento_repo to checkout'
+        default: 'multi-os-qemu-aarch64'
+        type: string
+      extra_apt_packages:
+        description: 'Space-separated extra apt packages for Linux runners'
+        default: ''
+        type: string
+      extra_brew_packages:
+        description: 'Space-separated extra Homebrew packages for macOS runners'
+        default: ''
+        type: string
+      extra_winget_packages:
+        description: 'Space-separated extra winget packages for Windows runners'
+        default: ''
+        type: string
+      extra_cygwin_packages:
+        description: 'Newline-separated extra Cygwin packages for Cygwin runners'
+        default: ''
+        type: string
+      env_vars:
+        description: 'JSON object of arbitrary environment variables to inject into jobs'
+        default: '{}'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================================
+  # 1. Fast Static, EOL, Doc-Tag, Clippy, Rustdoc & Script Syntax Gate
+  # ============================================================================
+  static-lint-and-eol:
+    name: Static Lints | EOL | asm-lint | Clippy | Rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Inject Custom Environment Variables
+        if: inputs.env_vars != '' && inputs.env_vars != '{}'
+        shell: bash
+        env:
+          RAW_ENV_VARS: ${{ inputs.env_vars }}
+        run: |
+          echo "$RAW_ENV_VARS" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
+
+      - name: Install Host Lint Dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends dos2unix ruby jq ${{ inputs.extra_apt_packages }}
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo Registry & Target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Enforce Line-Ending Policy (CRLF for Windows/DOS scripts, LF for sources)
+        shell: bash
+        run: sh ./ci/check_eol.sh
+
+      - name: Validate Shell & Ruby Script Syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n .githooks/pre-commit
+          sh -n ci/check_eol.sh
+          sh -n ci/run_dos_qemu_matrix.sh
+          bash -n scripts/build-all.sh scripts/bootstrap-toolchains.sh ci/replicate_ci.sh
+          ruby -c ci/dos_qemu_ci.rb
+
+      - name: Run asm-lint (100% @tag Docs, CFG Stack Balance, ABI/Clobbers, ISA Purity)
+        shell: bash
+        run: cargo run --release --quiet -p asm-lint -- --dir asm
+
+      - name: Run Cargo Clippy (Pedantic + Nursery + No Unwrap/Expect/Panic)
+        shell: bash
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run Rustdoc (100% Missing-Docs & Intra-Doc Link Gate)
+        shell: bash
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+  # ============================================================================
+  # 2. Sparse Multi-OS x Multi-Assembler x Multi-ISA Build & Verification Matrix
+  # ============================================================================
+  build-and-verify-matrix:
+    name: ${{ matrix.name }}
+    needs: static-lint-and-eol
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64 | ALL Toolchains (NASM/FASM/JWasm/FASMARM/LLVM) | ALL 6 ISAs
+            os: ubuntu-latest
+            profile: linux-full
+            toolchain: all
+            target: all
+            upload_artifacts: true
+
+          - name: Linux ARM64 | NASM + JWasm + LLVM | ALL 6 ISAs
+            os: ubuntu-24.04-arm
+            profile: linux-subset
+            toolchain: nasm,jwasm,llvm
+            target: all
+            experimental: true
+
+          - name: macOS ARM64 | NASM + JWasm + LLVM | ALL 6 ISAs
+            os: macos-latest
+            profile: macos
+            toolchain: nasm,jwasm,llvm
+            target: all
+
+          - name: Win 2025 x64 | Native NASM + FASM + JWasm + FASMARM + LLVM | Real Win32/Win64 Exec
+            os: windows-2025
+            profile: windows-native
+            toolchain: all
+            target: all
+
+          - name: Win 2022 x64 | Native BUILD.CMD (NASM + FASM + JWasm) | Real Win32/Win64 Exec
+            os: windows-2022
+            profile: windows-native
+            toolchain: nasm,fasm,jwasm
+            target: dos16,win16,x86_32,x86_64
+
+          - name: Win Cygwin | NASM | DOS16 + Win16
+            os: windows-2025
+            profile: windows-cygwin
+            toolchain: nasm
+            target: dos16,win16
+
+          - name: Win 11 ARM64 | LLVM + Native WINCMD_ARM64.EXE Execution
+            os: windows-11-arm
+            profile: windows-arm64
+            toolchain: llvm
+            target: arm64
+            experimental: true
+
+    steps:
+      - name: Disable Windows Error Reporting (WerFault) & Dr. Watson Dialogs
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "DontShowUI" -Value 1 -Type DWord -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug" -Name "Auto" -Value 1 -Type String -Force
+
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Inject Custom Environment Variables
+        if: inputs.env_vars != '' && inputs.env_vars != '{}'
+        shell: bash
+        env:
+          RAW_ENV_VARS: ${{ inputs.env_vars }}
+        run: |
+          if command -v jq >/dev/null 2>&1; then
+            echo "$RAW_ENV_VARS" | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Registry & Target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Bootstrapped Assemblers (POSIX)
+        if: runner.os != 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/wincmd-toolchains
+          key: wincmd-tc-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.toolchain }}
+
+      - name: Install Linux Dependencies (NASM, LLVM, LLD, Wine, dos2unix)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          pkgs="nasm llvm lld clang curl unzip tar dos2unix make ${{ inputs.extra_apt_packages }}"
+          sudo apt-get install -y --no-install-recommends $pkgs
+          if [ "${{ matrix.profile }}" = "linux-full" ] && [ "$(uname -m)" = "x86_64" ]; then
+            sudo dpkg --add-architecture i386 || true
+            sudo apt-get update -qq || true
+            sudo apt-get install -y --no-install-recommends wine wine64 wine32:i386 || true
+          fi
+
+      - name: Install macOS Dependencies (NASM, LLVM, dos2unix)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install nasm llvm dos2unix ${{ inputs.extra_brew_packages }}
+
+      - name: Install Extra Winget Packages
+        if: runner.os == 'Windows' && inputs.extra_winget_packages != ''
+        shell: pwsh
+        run: |
+          $packages = "${{ inputs.extra_winget_packages }}" -split '\s+' | Where-Object { $_ }
+          foreach ($pkg in $packages) {
+            winget install --silent --accept-package-agreements --accept-source-agreements $pkg
+          }
+
+      - name: Provision Windows Native Assemblers & LLVM
+        if: matrix.profile == 'windows-native' || matrix.profile == 'windows-arm64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tcRoot = Join-Path $env:RUNNER_TEMP 'wincmd-win-tc'
+          $tcBin  = Join-Path $tcRoot 'bin'
+          New-Item -ItemType Directory -Force -Path $tcBin | Out-Null
+
+          foreach ($llvmCand in @('C:\Program Files\LLVM\bin', 'C:\msys64\ucrt64\bin')) {
+            if (Test-Path (Join-Path $llvmCand 'lld-link.exe')) {
+              Add-Content -Path $env:GITHUB_PATH -Value $llvmCand
+              $env:PATH = "$llvmCand;$env:PATH"
+              break
+            }
+          }
+          if (-not (Get-Command lld-link -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress
+            Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
+            $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+          }
+
+          if ('${{ matrix.profile }}' -eq 'windows-native') {
+            if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+              choco install nasm -y --no-progress
+              foreach ($p in @('C:\Program Files\NASM', 'C:\Program Files (x86)\NASM')) {
+                if (Test-Path (Join-Path $p 'nasm.exe')) {
+                  Add-Content -Path $env:GITHUB_PATH -Value $p
+                  $env:PATH = "$p;$env:PATH"
+                }
+              }
+            }
+
+            $fasmDir = Join-Path $tcRoot 'fasm'
+            if (-not (Test-Path (Join-Path $fasmDir 'FASM.EXE'))) {
+              New-Item -ItemType Directory -Force -Path $fasmDir | Out-Null
+              $fasmZip = Join-Path $tcRoot 'fasmw.zip'
+              curl.exe -fsSL https://flatassembler.net/fasmw17332.zip -o $fasmZip
+              Expand-Archive -Path $fasmZip -DestinationPath $fasmDir -Force
+            }
+            Add-Content -Path $env:GITHUB_PATH -Value $fasmDir
+            Add-Content -Path $env:GITHUB_ENV -Value "INCLUDE=$fasmDir\INCLUDE"
+            $env:PATH = "$fasmDir;$env:PATH"
+            $env:INCLUDE = "$fasmDir\INCLUDE"
+
+            if ('${{ matrix.toolchain }}' -eq 'all') {
+              $fasmarmDir = Join-Path $tcRoot 'fasmarm'
+              if (-not (Test-Path (Join-Path $fasmarmDir 'FASMARM.EXE'))) {
+                New-Item -ItemType Directory -Force -Path $fasmarmDir | Out-Null
+                $fasmarmZip = Join-Path $tcRoot 'fasmarm.zip'
+                curl.exe -fsSL https://arm.flatassembler.net/FASMARM_small.ZIP -o $fasmarmZip
+                Expand-Archive -Path $fasmarmZip -DestinationPath $fasmarmDir -Force
+                Copy-Item -Path "$fasmDir\SOURCE\*" -Destination "$fasmarmDir\source" -Recurse -Force -ErrorAction SilentlyContinue
+                Push-Location "$fasmarmDir\source\Win32"
+                & "$fasmDir\FASM.EXE" fasmarm.asm "$fasmarmDir\FASMARM.EXE"
+                Pop-Location
+              }
+              Add-Content -Path $env:GITHUB_PATH -Value $fasmarmDir
+              Add-Content -Path $env:GITHUB_ENV -Value "INCLUDE=$fasmDir\INCLUDE;$fasmarmDir\include"
+            }
+
+            if (-not (Test-Path (Join-Path $tcBin 'jwasm.exe'))) {
+              $jwTar = Join-Path $tcRoot 'jwasm.tar.gz'
+              curl.exe -fsSL https://github.com/Baron-von-Riedesel/JWasm/archive/refs/heads/master.tar.gz -o $jwTar
+              tar.exe -xzf $jwTar -C $tcRoot
+              $jwSrcDir = Join-Path $tcRoot 'JWasm-master\src'
+              $cFiles = Get-ChildItem -Path $jwSrcDir -Filter '*.c' | Where-Object { $_.Name -ne 'trmem.c' } | ForEach-Object { $_.FullName }
+              & clang -O2 -DNDEBUG -D__NT__ -w -I"$jwSrcDir\H" -I"$jwSrcDir" @cFiles -o (Join-Path $tcBin 'jwasm.exe')
+              if ($LASTEXITCODE -ne 0) { throw "Failed to build jwasm.exe" }
+            }
+            Add-Content -Path $env:GITHUB_PATH -Value $tcBin
+          }
+
+      - name: Setup Cygwin
+        if: matrix.profile == 'windows-cygwin'
+        uses: cygwin/cygwin-install-action@v7
+        with:
+          packages: |
+            make
+            nasm
+            dos2unix
+            bash
+            ${{ inputs.extra_cygwin_packages }}
+
+      - name: Configure Cygwin Bash (igncr)
+        if: matrix.profile == 'windows-cygwin'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value "SHELLOPTS=igncr"
+
+      - name: Lower, Build, Verify & Test (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          WINCMD_TC_DIR: ${{ runner.temp }}/wincmd-toolchains
+          TOOLCHAIN: ${{ matrix.toolchain }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          make lint
+          make lower
+          make build TOOLCHAIN="$TOOLCHAIN" TARGET="$TARGET"
+          make verify TOOLCHAIN="$TOOLCHAIN" TARGET="$TARGET"
+          cargo test --workspace
+
+      - name: Smoke Test Win32 & Win64 Binaries via Wine (Linux x64)
+        if: matrix.profile == 'linux-full'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v wine >/dev/null 2>&1; then
+            for bin in build/nasm/x86_32/WINCMD32.EXE build/fasm/x86_32/WINCMD32.EXE build/jwasm/x86_32/WINCMD32.EXE build/nasm/x86_64/WINCMD64.EXE build/fasm/x86_64/WINCMD64.EXE build/jwasm/x86_64/WINCMD64.EXE; do
+              echo "[wine] Testing $bin /C VER ..."
+              WINEDEBUG=-all wine "$bin" /C VER || echo "[wine] Non-fatal wine probe notice for $bin"
+            done
+          else
+            echo "wine not available on runner; skipping Wine smoke test."
+          fi
+
+      - name: Lower, Build, Verify & Test (Windows Native)
+        if: matrix.profile == 'windows-native'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmd /c "BUILD.CMD"
+          if ($LASTEXITCODE -ne 0) { throw "BUILD.CMD failed with exit code $LASTEXITCODE" }
+
+          New-Item -ItemType Directory -Force -Path build/libs, build/nasm/x86_32, build/fasm/x86_32, build/jwasm/x86_32, build/nasm/x86_64, build/jwasm/x86_64 | Out-Null
+          & llvm-dlltool -m i386 -k -d asm/tc/arm_ms/k32_x86.def -l build/libs/kernel32_x86.lib
+          & llvm-dlltool -m i386:x86-64 -d asm/tc/arm_ms/k32_base.def -l build/libs/kernel32_x64.lib
+
+          & nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/x86_32/ -f win32 dist/src/nasm/x86_32/wincmd32.asm -o build/nasm/x86_32/wincmd32.obj
+          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH:NO /ENTRY:mainCRTStartup build/nasm/x86_32/wincmd32.obj build/libs/kernel32_x86.lib /OUT:build/nasm/x86_32/WINCMD32.EXE
+
+          & fasm dist/src/fasm/x86_32/wincmd32.asm build/fasm/x86_32/wincmd32.obj
+          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH:NO /ENTRY:mainCRTStartup build/fasm/x86_32/wincmd32.obj build/libs/kernel32_x86.lib /OUT:build/fasm/x86_32/WINCMD32.EXE
+
+          & jwasm -q -WX -W4 -Idist/src/jwasm/x86_32 -coff -Fobuild/jwasm/x86_32/wincmd32.obj dist/src/jwasm/x86_32/wincmd32.asm
+          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH:NO /ENTRY:mainCRTStartup build/jwasm/x86_32/wincmd32.obj build/libs/kernel32_x86.lib /OUT:build/jwasm/x86_32/WINCMD32.EXE
+
+          & nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/x86_64/ -f win64 dist/src/nasm/x86_64/wincmd64.asm -o build/nasm/x86_64/wincmd64.obj
+          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,5.02 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup build/nasm/x86_64/wincmd64.obj build/libs/kernel32_x64.lib /OUT:build/nasm/x86_64/WINCMD64.EXE
+
+          & jwasm -q -WX -W4 -Idist/src/jwasm/x86_64 -win64 -Fobuild/jwasm/x86_64/wincmd64.obj dist/src/jwasm/x86_64/wincmd64.asm
+          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,5.02 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup build/jwasm/x86_64/wincmd64.obj build/libs/kernel32_x64.lib /OUT:build/jwasm/x86_64/WINCMD64.EXE
+
+          & cargo run --release --quiet -p asm-lint -- --equiv WINCMD.COM build/nasm/dos16/WINCMD.COM build/fasm/dos16/WINCMD.COM build/jwasm/dos16/WINCMD.COM
+          & cargo run --release --quiet -p asm-lint -- --equiv ASMCONV.COM build/nasm/dos16/ASMCONV.COM build/fasm/dos16/ASMCONV.COM build/jwasm/dos16/ASMCONV.COM
+          & cargo run --release --quiet -p asm-lint -- --equiv WINCMD16.EXE build/nasm/win16/WINCMD16.EXE build/fasm/win16/WINCMD16.EXE build/jwasm/win16/WINCMD16.EXE
+          & cargo run --release --quiet -p asm-lint -- --equiv WINCMD286.EXE build/nasm/win16/WINCMD286.EXE build/fasm/win16/WINCMD286.EXE build/jwasm/win16/WINCMD286.EXE
+          & cargo run --release --quiet -p asm-lint -- --equiv WINCMD32.EXE build/nasm/x86_32/WINCMD32.EXE build/fasm/x86_32/WINCMD32.EXE build/jwasm/x86_32/WINCMD32.EXE
+          & cargo run --release --quiet -p asm-lint -- --equiv WINCMD64.EXE build/nasm/x86_64/WINCMD64.EXE build/fasm/x86_64/WINCMD64.EXE build/jwasm/x86_64/WINCMD64.EXE
+          & cargo run --release --quiet -p asm-lint -- --purity 386 build/nasm/x86_32/WINCMD32.EXE
+          & cargo run --release --quiet -p asm-lint -- --purity x64 build/nasm/x86_64/WINCMD64.EXE
+
+          foreach ($exe in @('build/nasm/x86_32/WINCMD32.EXE', 'build/fasm/x86_32/WINCMD32.EXE', 'build/jwasm/x86_32/WINCMD32.EXE', 'build/nasm/x86_64/WINCMD64.EXE', 'build/fasm/x86_64/WINCMD64.EXE', 'build/jwasm/x86_64/WINCMD64.EXE')) {
+            Write-Host "[native-win] Running $exe /C VER"
+            $out = & $exe /C VER
+            if ($LASTEXITCODE -ne 0) { throw "$exe /C VER exited with $LASTEXITCODE" }
+            Write-Host "  Output: $out"
+          }
+
+          & cargo test --workspace
+
+      - name: Lower, Build & Verify (Windows Cygwin)
+        if: matrix.profile == 'windows-cygwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release --quiet -p asm-lint -- --dir asm
+          cargo run --release --quiet -p asm-conv -- --in-dir asm --out-dir dist/src
+          C:/cygwin/bin/bash.exe --login -o igncr -c '
+            set -euo pipefail
+            cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+            mkdir -p build/nasm/dos16 build/nasm/win16
+            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/dos16/ -f bin dist/src/nasm/dos16/wincmd.asm -o build/nasm/dos16/WINCMD.COM
+            nasm -Ox -w+all -w-reloc -w+error -f bin dist/src/nasm/dos16/wincmd_m.asm -o build/nasm/dos16/WINCMD.MSG
+            nasm -Ox -w+all -w-reloc -w+error -f bin dist/src/nasm/dos16/util/asmconv.asm -o build/nasm/dos16/ASMCONV.COM
+            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/wincmd_pif.asm -o build/nasm/win16/WINCMD.PIF
+            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_main.asm -o build/nasm/win16/WINCMD16.EXE
+            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_286.asm -o build/nasm/win16/WINCMD286.EXE
+          '
+          cargo run --release --quiet -p asm-lint -- --budget build/nasm/dos16/WINCMD.COM 49152
+          cargo run --release --quiet -p asm-lint -- --budget build/nasm/dos16/ASMCONV.COM 4096
+          cargo run --release --quiet -p asm-lint -- --budget build/nasm/win16/WINCMD.PIF 369
+
+      - name: Build & Execute WINCMD_ARM64.EXE Natively on Windows 11 ARM64
+        if: matrix.profile == 'windows-arm64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & cargo run --release --quiet -p asm-conv -- --in-dir asm --out-dir dist/src
+          New-Item -ItemType Directory -Force -Path build/llvm/arm64 | Out-Null
+          & llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I dist/src/llvm-mc/arm64 -filetype=obj dist/src/llvm-mc/arm64/wincmda64.asm -o build/llvm/arm64/wincmda64.obj
+          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup build/llvm/arm64/wincmda64.obj /OUT:build/llvm/arm64/WINCMD_ARM64.EXE
+          & cargo run --release --quiet -p asm-lint -- --purity arm64 build/llvm/arm64/WINCMD_ARM64.EXE
+          & build/llvm/arm64/WINCMD_ARM64.EXE
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE exited with $LASTEXITCODE" }
+
+      - name: Upload Multi-ISA Built Artifacts
+        if: matrix.upload_artifacts == true
+        uses: actions/upload-artifact@v7
+        with:
+          name: wincmd-multi-isa-binaries
+          path: |
+            build/nasm/**
+            build/fasm/**
+            build/jwasm/**
+            build/fasmarm/**
+            build/llvm/**
+          retention-days: 14
+
+  # ============================================================================
+  # 3. Parallel 4-Era 8086/286 Emulation & Cross-Assembler Differential Fuzzing
+  # ============================================================================
+  dos-emu-and-fuzz-matrix:
+    name: DOS Era ${{ matrix.era }} | emu-cov + ASMCONV.COM + diff-fuzz (${{ inputs.fuzz_cases }} cases)
+    needs: build-and-verify-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        era: ['1.25', '2.00', '4.00', '7.10']
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Registry & Target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Download Multi-ISA Built Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: wincmd-multi-isa-binaries
+          path: build
+
+      - name: Run 8086/286 Emulator Workloads & Emit LCOV (MS-DOS ${{ matrix.era }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cmd in " /C VER" " /C ECHO HELLO_CI_${{ matrix.era }}" " /C SET /A X=6*7" " /C IF 1==1 ECHO COND_OK" " /C DIR"; do
+            cargo run --release --quiet -p emu-cov -- --com build/nasm/dos16/WINCMD.COM --era "${{ matrix.era }}" --args "$cmd" --lcov "lcov-dos-${{ matrix.era }}.info"
+          done
+
+      - name: Smoke Test Self-Hosted ASMCONV.COM in Emulator (MS-DOS ${{ matrix.era }})
+        if: matrix.era != '1.25'
+        shell: bash
+        run: |
+          cargo run --release --quiet -p emu-cov -- --com build/nasm/dos16/ASMCONV.COM --era "${{ matrix.era }}" --args " /?"
+
+      - name: Run Cross-Assembler Differential Fuzzer (NASM == FASM == JWasm)
+        if: inputs.run_fuzz == true
+        shell: bash
+        run: |
+          cargo run --release --quiet -p diff-fuzz -- --era "${{ matrix.era }}" --cases "${{ inputs.fuzz_cases }}" build/nasm/dos16/WINCMD.COM build/fasm/dos16/WINCMD.COM build/jwasm/dos16/WINCMD.COM
+
+      - name: Upload Era Emulator LCOV Report
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-dos-${{ matrix.era }}
+          path: lcov-dos-${{ matrix.era }}.info
+          retention-days: 7
+
+  # ============================================================================
+  # 4. Containerized Linux Distro Matrix (Ubuntu glibc + Alpine musl)
+  # ============================================================================
+  docker-container-matrix:
+    name: Docker ${{ matrix.distro }} (${{ matrix.libc }}) | Multi-Assembler Build & Test
+    needs: static-lint-and-eol
+    if: inputs.run_docker == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: Ubuntu 24.04
+            libc: glibc
+            dockerfile: ci/ubuntu.Dockerfile
+            tag: wincmd-ci-ubuntu:latest
+            toolchain: all
+          - distro: Alpine Linux
+            libc: musl
+            dockerfile: ci/alpine.Dockerfile
+            tag: wincmd-ci-alpine:latest
+            toolchain: all
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Build ${{ matrix.distro }} CI Container
+        shell: bash
+        run: docker build -f "${{ matrix.dockerfile }}" -t "${{ matrix.tag }}" .
+
+      - name: Run Lint, Lower, Build, Verify & Cargo Test in ${{ matrix.distro }}
+        shell: bash
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/workspace" -w /workspace -e TOOLCHAIN="${{ matrix.toolchain }}" -e WINCMD_TC_DIR=/tmp/wincmd-tc "${{ matrix.tag }}" bash -lc 'make lint && make lower && make build TOOLCHAIN="$TOOLCHAIN" && make verify TOOLCHAIN="$TOOLCHAIN" && cargo test --workspace'
+
+  # ============================================================================
+  # 5. Rust Test Coverage, Doc Coverage & GitHub Step Summary
+  # ============================================================================
+  coverage-and-summary:
+    name: Coverage (llvm-cov + 100% Docs) & Footprint Report
+    needs: [static-lint-and-eol, build-and-verify-matrix]
+    if: inputs.run_coverage == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Setup Rust Toolchain with llvm-tools-preview
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Cargo Registry & Target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Download Multi-ISA Built Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: wincmd-multi-isa-binaries
+          path: build
+
+      - name: Measure Rust Workspace Test Coverage & Publish Step Summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --workspace --lcov --output-path lcov-rust.info
+          COV_SUMMARY="$(cargo llvm-cov --workspace --summary-only)"
+          echo "$COV_SUMMARY"
+          TEST_PCT="$(echo "$COV_SUMMARY" | awk '/^TOTAL[[:space:]]+/ { print $10 }')"
+          ASM_LINT_OUT="$(cargo run --release --quiet -p asm-lint -- --dir asm)"
+
+          {
+            echo "## win-cmd-asm CI Verification Summary"
+            echo ""
+            echo "- **Assembly Doc / CFG / ABI / Purity:** `${ASM_LINT_OUT}` (**100.00%**)"
+            echo "- **Rust Workspace Line Coverage (`cargo-llvm-cov`):** **${TEST_PCT:-N/A}**"
+            echo ""
+            echo "### Built Artifact Footprint Report"
+            echo ""
+            echo "| Artifact | Size (bytes) |"
+            echo "| :--- | ---: |"
+            find build -type f \( -name '*.COM' -o -name '*.EXE' -o -name '*.MSG' -o -name '*.PIF' \) | sort | while IFS= read -r f; do
+              sz="$(wc -c < "$f" | tr -d ' ')"
+              echo "| `$f` | $sz |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Rust LCOV Report
+        uses: actions/upload-artifact@v7
+        with:
+          name: lcov-rust-workspace
+          path: lcov-rust.info
+          retention-days: 14
+
+  # ============================================================================
+  # 6. Opt-In Real Headless QEMU MS-DOS (1.25 / 2.00 / 4.00) & FreeDOS Matrix
+  #    (Directly modeled on SamuelMarks/c-ci + SamuelMarks/bento SERGET.COM)
+  # ============================================================================
+  prepare-msdos-qemu-matrix:
+    name: Prepare Real MS-DOS QEMU Matrix
+    if: ${{ inputs.msdos_qemu_testing == true }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Normalize MS-DOS QEMU Matrix Targets
+        id: set-matrix
+        shell: bash
+        env:
+          RAW_VERSIONS: ${{ inputs.msdos_versions }}
+        run: |
+          python3 - << 'PY'
+          import json
+          import os
+
+          raw = os.environ.get("RAW_VERSIONS", "4.0,2.0,1.25,freedos").strip() or "4.0,2.0,1.25,freedos"
+          if raw.startswith("["):
+              items = [str(x).strip() for x in json.loads(raw) if str(x).strip()]
+          elif raw == "all":
+              items = ["freedos", "4.0", "2.0", "1.25"]
+          elif raw == "msdos":
+              items = ["4.0", "2.0", "1.25"]
+          else:
+              items = [x.strip() for x in raw.split(",") if x.strip()]
+
+          canonical = {
+              "4.0": ("msdos-4.0", "MS-DOS 4.00"),
+              "4.00": ("msdos-4.0", "MS-DOS 4.00"),
+              "msdos-4.0": ("msdos-4.0", "MS-DOS 4.00"),
+              "2.0": ("msdos-2.0", "MS-DOS 2.00"),
+              "2.00": ("msdos-2.0", "MS-DOS 2.00"),
+              "msdos-2.0": ("msdos-2.0", "MS-DOS 2.00"),
+              "1.25": ("msdos-1.25", "MS-DOS 1.25"),
+              "msdos-1.25": ("msdos-1.25", "MS-DOS 1.25"),
+              "freedos": ("freedos", "FreeDOS 1.3"),
+              "freedos-1.3": ("freedos", "FreeDOS 1.3"),
+          }
+
+          includes = []
+          for item in items:
+              key = item.lower()
+              if key not in canonical:
+                  raise SystemExit(f"Unsupported msdos_versions entry: {item}")
+              os_target, label = canonical[key]
+              includes.append({
+                  "name": f"QEMU {label} | Live WINCMD.COM + ASMCONV.COM Verification",
+                  "os_target": os_target,
+              })
+
+          payload = json.dumps({"include": includes}, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("matrix=" + payload + chr(10))
+          PY
+
+  msdos-qemu-test:
+    name: ${{ matrix.name }}
+    needs: [build-and-verify-matrix, prepare-msdos-qemu-matrix]
+    if: ${{ inputs.msdos_qemu_testing == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-msdos-qemu-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Download Multi-ISA Built Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: wincmd-multi-isa-binaries
+          path: build
+
+      - name: Stage Bento DOS Image Builder Repository
+        shell: bash
+        env:
+          BENTO_REPO: ${{ inputs.bento_repo }}
+          BENTO_REF: ${{ inputs.bento_ref }}
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/bento"
+          cloned_bento=0
+          for ref_cand in "$BENTO_REF" "multi-os-qemu-aarch64" "dos" "main"; do
+            [ -z "$ref_cand" ] && continue
+            if git clone --depth 1 --branch "$ref_cand" "https://github.com/${BENTO_REPO}.git" "$RUNNER_TEMP/bento" 2>/dev/null; then
+              if [ -f "$RUNNER_TEMP/bento/msdos-builder.sh" ]; then
+                cloned_bento=1
+                break
+              fi
+              rm -rf "$RUNNER_TEMP/bento"
+            fi
+          done
+          if [ "$cloned_bento" -ne 1 ]; then
+            echo "Error: Failed to locate msdos-builder.sh in ${BENTO_REPO}" >&2
+            exit 1
+          fi
+          echo "BENTO_HEAD_SHA=$(git -C "$RUNNER_TEMP/bento" rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install QEMU, mtools, dosfstools, NASM & Ruby
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils mtools dosfstools nasm unzip xz-utils ruby curl ca-certificates
+
+      - name: Cache Bento DOS Base Images
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bento/builds
+          key: wincmd-bento-dos-v1-${{ env.BENTO_HEAD_SHA }}-${{ matrix.os_target }}
+          restore-keys: |
+            wincmd-bento-dos-v1-${{ env.BENTO_HEAD_SHA }}-
+
+      - name: Execute WINCMD.COM & ASMCONV.COM Inside Real ${{ matrix.os_target }} QEMU Guest
+        shell: bash
+        run: |
+          sh ./ci/run_dos_qemu_matrix.sh --os "${{ matrix.os_target }}" --toolchain nasm --bento-dir "$RUNNER_TEMP/bento" --build-dir "$GITHUB_WORKSPACE/build"

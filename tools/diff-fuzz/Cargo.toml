@@ -1,0 +1,13 @@
+[package]
+name = "diff-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic SplitMix64 batch/.com script generator and cross-dialect differential verifier."
+
+[dependencies]
+wincmd-diag.workspace = true
+emu-cov.workspace = true
+
+[lints]
+workspace = true

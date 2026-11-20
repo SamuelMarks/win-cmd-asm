@@ -1,0 +1,122 @@
+# ==============================================================================
+# win-cmd-asm — Extensive Multi-ISA Assembly, Batch & Rust .editorconfig
+# https://editorconfig.org
+# ==============================================================================
+
+root = true
+
+# Default settings across all text files (UTF-8 without BOM, LF, 4-space indent)
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+tab_width = 4
+
+# Canonical & Toolchain-Specific Assembly Sources (x86-16, IA-32, x64, ARM32, ARM64)
+[*.{asm,ASM,inc,INC,mac,MAC,s,S}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+# Module-Definition & Linker Scripts
+[*.{def,DEF,ld,lds}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+
+# Rust Workspace Crates (tools/*)
+[*.rs]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+# Cargo Manifests & Lockfiles
+[{*.toml,Cargo.lock}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+
+# C / C++ Toolchain Shims & Headers
+[*.{c,h,cpp,hpp,cc,cxx}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+# GNU Makefiles (Tabs required by Make syntax)
+[{Makefile,GNUmakefile,makefile,*.mk}]
+charset = utf-8
+end_of_line = lf
+indent_style = tab
+indent_size = 4
+tab_width = 4
+
+# POSIX Shell Scripts, Awk/Sed & Extensionless Git Hooks (Strict LF, 2-space indent)
+[{*.sh,*.bash,*.zsh,*.awk,*.sed,.githooks/*}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+
+# MS-DOS & Windows Batch / Command Scripts (Strict CRLF, UTF-8 without BOM!)
+# Note: Placed after .githooks/* so .githooks/pre-commit.cmd receives CRLF.
+[{*.bat,*.BAT,*.cmd,*.CMD,*.btm,*.BTM,AUTOEXEC.BAT,autoexec.bat,CONFIG.SYS,config.sys,.githooks/*.cmd,.githooks/*.bat}]
+charset = utf-8
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+
+# Windows Registry, INF/INI, Win16/Win32 Resource Scripts, PowerShell, VBScript & MSBuild
+[*.{reg,REG,inf,INF,ini,INI,rc,RC,dlg,DLG,mc,MC,ps1,psm1,psd1,vbs,VBS,wsf,WSF,sln,vcxproj,vcxproj.filters,props,targets}]
+charset = utf-8
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+
+# Structured Data, Manifests, CI Workflows & Web Assets
+[*.{json,yaml,yml,xml,manifest,svg,html,css,js,ts}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+
+# Markdown Documentation (Preserve trailing double-space hard line breaks)
+[*.{md,markdown}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = false
+
+# Plain Text & ReStructuredText / AsciiDoc
+[*.{txt,rst,adoc}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+
+# Repository Configuration Dotfiles
+[{.gitignore,.gitattributes,.editorconfig}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+
+# Binary Files (Never alter encoding, whitespace, or final bytes)
+[*.{bin,BIN,com,COM,exe,EXE,dll,DLL,sys,SYS,drv,DRV,vxd,VXD,386,ovl,ovr,pif,PIF,scr,cpl,ocx,efi,rom,elf,o,obj,OBJ,omf,a,lib,LIB,exp,res,RES,pch,pdb,PDB,ilk,dbg,sym,msg,MSG,img,IMG,ima,flp,vfd,dsk,iso,ISO,vhd,vhdx,vmdk,vdi,qcow,qcow2,dmg,ico,cur,bmp,png,jpg,jpeg,gif,webp,woff,woff2,ttf,otf,fon,pdf,zip,gz,tgz,bz2,xz,zst,7z,cab,msi,rar,tar}]
+charset = unset
+end_of_line = unset
+insert_final_newline = false
+trim_trailing_whitespace = false
+indent_style = unset
+indent_size = unset

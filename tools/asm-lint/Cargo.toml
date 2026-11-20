@@ -1,0 +1,13 @@
+[package]
+name = "asm-lint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Multi-ISA static analyzer, 100% doc-header gate, CFG stack/ABI verifier, and binary purity/budget checker."
+
+[dependencies]
+wincmd-diag.workspace = true
+asm-conv.workspace = true
+
+[lints]
+workspace = true

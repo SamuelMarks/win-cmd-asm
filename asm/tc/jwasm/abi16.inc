@@ -1,0 +1,13 @@
+;; @file abi16.inc
+;; @isa 8086
+;; @desc Native JWasm 16-bit Real/Protected-Mode setup header (.8086 / .286p).
+
+IFNDEF WINCMD_JWASM_ABI16_INC
+WINCMD_JWASM_ABI16_INC EQU 1
+IFDEF TARGET_286
+.286p
+ELSE
+.8086
+ENDIF
+OPTION CASEMAP:NONE
+ENDIF

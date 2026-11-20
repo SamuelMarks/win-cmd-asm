@@ -1,0 +1,12 @@
+[package]
+name = "emu-cov"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic 8086/286 & MS-DOS 1.25/2.00/4.00/7.10 instruction and conditional-branch coverage emulator."
+
+[dependencies]
+wincmd-diag.workspace = true
+
+[lints]
+workspace = true

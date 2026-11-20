@@ -1,0 +1,321 @@
+# ==============================================================================
+# win-cmd-asm — Extensive Multi-ISA, Multi-Assembler & Rust Tooling .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Project Build, Lowered Source Distribution & Bootstrapped Toolchains
+# ------------------------------------------------------------------------------
+/build/
+/dist/
+/target/
+/.toolchains/
+/out/
+/bin/
+/obj/
+/stage/
+/release/
+/packages/
+
+# ------------------------------------------------------------------------------
+# 2. DOS / Win16 / Win32 / Win64 / WinCE / ARM Binaries, Objects & Libraries
+# ------------------------------------------------------------------------------
+# Object & intermediate files (COFF, OMF, ELF, Mach-O, Win16/Win32 resources)
+*.o
+*.O
+*.obj
+*.OBJ
+*.omf
+*.OMF
+*.lo
+*.slo
+*.res
+*.RES
+*.aps
+*.pch
+*.ipch
+*.iobj
+*.ipdb
+*.pgc
+*.pgd
+*.tlog
+*.idb
+
+# Flat binaries, DOS .COM, MZ/NE/PE32/PE32+ .EXE, drivers, PIFs & overlays
+*.bin
+*.BIN
+*.com
+*.COM
+*.exe
+*.EXE
+*.dll
+*.DLL
+*.so
+*.so.*
+*.dylib
+*.drv
+*.DRV
+*.vxd
+*.VXD
+*.386
+*.sys
+*.SYS
+!CONFIG.SYS
+!config.sys
+*.ovl
+*.OVL
+*.ovr
+*.OVR
+*.pif
+*.PIF
+*.scr
+*.SCR
+*.cpl
+*.CPL
+*.ocx
+*.OCX
+*.efi
+*.EFI
+*.rom
+*.ROM
+*.elf
+*.ELF
+*.hex
+*.HEX
+*.srec
+*.s19
+*.mot
+
+# Static/import libraries & linker export artifacts
+*.a
+*.la
+*.lib
+*.LIB
+*.exp
+*.EXP
+*.def.tmp
+
+# Compiled message tables (e.g., DOS 4.00 WINCMD.MSG binary output)
+*.msg
+*.MSG
+
+# ------------------------------------------------------------------------------
+# 3. Assembler & Linker Listings, Symbol Maps, Cross-References & Debug Info
+# ------------------------------------------------------------------------------
+*.lst
+*.LST
+*.map
+*.MAP
+*.sym
+*.SYM
+*.pdb
+*.PDB
+*.ilk
+*.ILK
+*.dbg
+*.DBG
+*.dSYM/
+*.su
+*.err
+*.ERR
+*.crf
+*.CRF
+*.sbr
+*.SBR
+*.bsc
+*.BSC
+*.fas
+*.FAS
+*.pre
+*.PRE
+*.i
+*.s.tmp
+
+# ------------------------------------------------------------------------------
+# 4. Floppy/HDD/Optical Media & Vintage OS Emulators (QEMU, 86Box, DOSBox, Wine)
+# ------------------------------------------------------------------------------
+*.img
+*.IMG
+*.ima
+*.IMA
+*.flp
+*.FLP
+*.vfd
+*.VFD
+*.dsk
+*.DSK
+*.vhd
+*.vhdx
+*.vmdk
+*.vdi
+*.qcow
+*.qcow2
+*.qed
+*.raw
+*.iso
+*.ISO
+*.cue
+*.cdr
+*.dmg
+
+# Emulator state, NVRAM, CMOS, logs & prefixes
+*.nvram
+*.nvr
+*.cmos
+*.sav
+*.state
+/.wine/
+/wineprefix/
+/.86box/
+/.dosbox/
+/.vagrant/
+bochsout.txt
+bx_enh_dbg.ini
+qemu.log
+serial.log
+
+# ------------------------------------------------------------------------------
+# 5. Rust, Cargo, LLVM Coverage, Fuzzing & Profiling Artifacts
+# ------------------------------------------------------------------------------
+**/*.rs.bk
+lcov.info
+*.lcov
+/coverage/
+/htmlcov/
+cobertura.xml
+tarpaulin-report.*
+default.profraw
+*.profraw
+*.profdata
+*.gcno
+*.gcda
+*.gcov
+/fuzz/corpus/
+/fuzz/artifacts/
+crash-*
+leak-*
+timeout-*
+slow-unit-*
+proptest-regressions/
+flamegraph.svg
+perf.data
+perf.data.old
+
+# ------------------------------------------------------------------------------
+# 6. Operating System Metadata (macOS, Windows, MS-DOS, Linux)
+# ------------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.fseventsd
+.TemporaryItems
+.apdisk
+
+# Windows & MS-DOS
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+*.stackdump
+
+# Linux / XDG / NFS / FUSE
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ------------------------------------------------------------------------------
+# 7. Editors, IDEs & Code Indexing
+# ------------------------------------------------------------------------------
+# Visual Studio & VS Code
+/.vs/
+/.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+
+# JetBrains (RustRover, CLion, IntelliJ)
+/.idea/
+*.iml
+*.iws
+*.ipr
+/cmake-build-*/
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+.*.sw?
+Session.vim
+.netrwhist
+
+# Emacs
+#*#
+.#*
+*.elc
+/auto-save-list/
+tramp
+
+# Sublime Text, Zed, Helix & Misc
+*.sublime-workspace
+*.sublime-project
+/.zed/
+/.helix/
+
+# Ctags / Gtags / Cscope / Clangd
+tags
+TAGS
+GTAGS
+GRTAGS
+GPATH
+cscope.files
+cscope.out
+cscope.in.out
+cscope.po.out
+/.cache/
+compile_commands.json
+
+# ------------------------------------------------------------------------------
+# 8. Temporary Files, Backups, Patch Rejects, Logs & Local Secrets
+# ------------------------------------------------------------------------------
+*.tmp
+*.TMP
+*.temp
+*.TEMP
+*.bak
+*.BAK
+*.old
+*.OLD
+*.orig
+*.rej
+*.log
+*.LOG
+/tmp/
+/.tmp/
+
+# Local environment & credentials (never commit secrets or signing keys)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.cer

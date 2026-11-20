@@ -1,0 +1,51 @@
+# @file .github/workflows/ci.yml
+# @brief Main CI caller workflow for win-cmd-asm invoking the reusable asm-ci.yml pipeline.
+# @description
+#   Triggers automatically on pushes/PRs to main/master and supports manual
+#   workflow_dispatch overrides (including opt-in real headless QEMU MS-DOS
+#   1.25 / 2.00 / 4.00 / FreeDOS 1.3 testing via SamuelMarks/bento).
+
+name: CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches:
+  workflow_dispatch:
+    inputs:
+      msdos_qemu_testing:
+        description: 'Run real headless QEMU MS-DOS (4.0, 2.0, 1.25) & FreeDOS 1.3 tests via Bento'
+        type: boolean
+        default: true
+      msdos_versions:
+        description: 'DOS targets when msdos_qemu_testing is true (4.0, 2.0, 1.25, freedos, msdos, all)'
+        type: string
+        default: '4.0,2.0,1.25,freedos'
+      fuzz_cases:
+        description: 'Differential fuzz cases per DOS era'
+        type: number
+        default: 1000
+      run_docker:
+        description: 'Run Ubuntu (glibc) and Alpine (musl) Docker container matrix'
+        type: boolean
+        default: true
+      run_coverage:
+        description: 'Run Rust llvm-cov + doc coverage summary'
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  multi-isa-ci:
+    uses: ./.github/workflows/asm-ci.yml
+    with:
+      run_fuzz: true
+      fuzz_cases: ${{ inputs.fuzz_cases || 1000 }}
+      run_coverage: ${{ inputs.run_coverage != false }}
+      run_docker: ${{ inputs.run_docker != false }}
+      msdos_qemu_testing: ${{ inputs.msdos_qemu_testing == true }}
+      msdos_versions: ${{ inputs.msdos_versions || '4.0,2.0,1.25,freedos' }}

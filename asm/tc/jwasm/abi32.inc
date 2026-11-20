@@ -1,0 +1,10 @@
+;; @file abi32.inc
+;; @isa 386
+;; @desc Native JWasm 32-bit IA-32 pure i386 flat setup header.
+
+IFNDEF WINCMD_JWASM_ABI32_INC
+WINCMD_JWASM_ABI32_INC EQU 1
+.386
+.MODEL FLAT, SYSCALL
+OPTION CASEMAP:NONE
+ENDIF

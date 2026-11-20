@@ -1,0 +1,12 @@
+[package]
+name = "asm-conv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Canonical multi-ISA assembly parser and lossless NASM/FASM/JWasm/FASMARM/LLVM-MC/ARMASM lowering engine."
+
+[dependencies]
+wincmd-diag.workspace = true
+
+[lints]
+workspace = true
