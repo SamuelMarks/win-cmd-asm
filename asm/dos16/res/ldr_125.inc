@@ -51,6 +51,7 @@
     mov ds, ax
     mov es, ax
     mov word [resState + RES_STATE.dwLastExitCode], 0
+    mov byte [bNeedTrnCheck], 1
     call res_install_vecs
     call res_ensure_transient
 

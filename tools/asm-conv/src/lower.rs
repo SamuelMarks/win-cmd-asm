@@ -33,6 +33,21 @@ pub fn lower_module(
     module: &CanonicalModule,
     target: TargetAssembler,
 ) -> Result<String, ToolError> {
+    lower_module_with_frames(module, None, target)
+}
+
+/// Lowers `module` into native assembler syntax, optionally using a pre-collected list of
+/// `Win64Frame` procedures (including transitively `@include`d modules in exact `.text` order).
+///
+/// # Errors
+///
+/// Returns [`ToolError::Lowering`] if the module's `@cpu` or `@format` is incompatible
+/// with `target`, or if a construct cannot be represented cleanly.
+pub fn lower_module_with_frames(
+    module: &CanonicalModule,
+    ordered_win64_frames: Option<&[(String, u32, Vec<String>)]>,
+    target: TargetAssembler,
+) -> Result<String, ToolError> {
     let file_span = SourceSpan::new(&module.file_path, 1, 1);
     if let Some(isa) = module.cpu {
         if !target.supports_isa(isa) {
@@ -54,27 +69,46 @@ pub fn lower_module(
     emit_doc_block(&mut out, &module.file_doc, target);
     emit_module_preamble(&mut out, module, target)?;
 
-    let mut active_section: Option<SectionKind> = None;
-    let mut active_seg_base = String::from("wincmd_seg_base");
-    let mut win64_frames: Vec<(String, u32, Vec<String>)> = Vec::new();
+    let mut sec_state = SectionState {
+        active: None,
+        seg_base: String::from("wincmd_seg_base"),
+        armnt_idx: 0,
+        armnt_prev_kind: None,
+        emitted_load_config: false,
+        emitted_cfg_nop: false,
+    };
+    let mut local_frames: Vec<(String, u32, Vec<String>)> = Vec::new();
+    lower_module_items(&mut out, module, &mut sec_state, &mut local_frames, target)?;
 
+    let frames_slice = ordered_win64_frames.unwrap_or(&local_frames);
+    finalize_module_sections(&mut out, module, &mut sec_state, frames_slice, target);
+    emit_module_trailer(&mut out, module, target);
+
+    Ok(out)
+}
+
+fn lower_module_items(
+    out: &mut String,
+    module: &CanonicalModule,
+    sec_state: &mut SectionState,
+    win64_frames: &mut Vec<(String, u32, Vec<String>)>,
+    target: TargetAssembler,
+) -> Result<(), ToolError> {
     for item in &module.items {
         match item {
-            TopItem::Include { path, .. } => emit_include(&mut out, path, target),
+            TopItem::Include { path, .. } => emit_include(out, path, target),
             TopItem::Section { kind, span } => {
-                close_open_section(&mut out, module.format, active_section, target);
-                active_seg_base = open_section(&mut out, module.format, *kind, target, span)?;
-                active_section = Some(*kind);
+                switch_module_section(out, sec_state, module, *kind, target, span)?;
             }
-            TopItem::Global { symbol, .. } => emit_global(&mut out, symbol, module, target),
-        TopItem::Extern { symbol, kind, .. } => {
-                emit_extern(&mut out, module.format, symbol, kind, target);
+            TopItem::Global { symbol, .. } => emit_global(out, symbol, module, target),
+            TopItem::Extern { symbol, kind, .. } => {
+                emit_extern(out, module.format, symbol, kind, target);
             }
             TopItem::Const {
                 doc, name, expr, ..
             } => {
-                emit_doc_block(&mut out, doc, target);
-                emit_const(&mut out, name, expr, target);
+                emit_doc_block(out, doc, target);
+                emit_const(out, name, expr, target);
             }
             TopItem::Struc {
                 doc,
@@ -83,8 +117,8 @@ pub fn lower_module(
                 fields,
                 ..
             } => {
-                emit_doc_block(&mut out, doc, target);
-                emit_struc(&mut out, name, *expected_size, fields, target);
+                emit_doc_block(out, doc, target);
+                emit_struc(out, name, *expected_size, fields, target);
             }
             TopItem::Proc {
                 doc,
@@ -93,43 +127,321 @@ pub fn lower_module(
                 body,
                 span,
             } => {
-                emit_doc_block(&mut out, doc, target);
+                emit_doc_block(out, doc, target);
                 if let ProcKind::Win64Frame {
                     stack_alloc,
                     saved_regs,
                 } = kind
                 {
                     win64_frames.push((name.clone(), *stack_alloc, saved_regs.clone()));
+                } else if matches!(
+                    module.format,
+                    BinaryFormat::ArmV4Pe | BinaryFormat::ArmV7Pe | BinaryFormat::Arm64Pe
+                ) {
+                    win64_frames.push((name.clone(), 0, Vec::new()));
                 }
                 emit_proc(
-                    &mut out,
+                    out,
                     &ProcEmitReq {
                         module,
                         name,
                         kind,
                         body,
-                        active_seg_base: &active_seg_base,
+                        active_seg_base: &sec_state.seg_base,
                         target,
                         span,
                     },
                 )?;
             }
             TopItem::Stmt(stmt) => {
-                emit_stmt(&mut out, module, None, None, stmt, &active_seg_base, target)?;
+                emit_stmt(out, module, None, None, stmt, &sec_state.seg_base, target)?;
             }
         }
     }
+    Ok(())
+}
 
-    close_open_section(&mut out, module.format, active_section, target);
-    if module.format == BinaryFormat::Coff64 && !win64_frames.is_empty() {
-        emit_win64_unwind_tables(&mut out, &win64_frames, target);
-    }
-    if module.format == BinaryFormat::Coff64 && target == TargetAssembler::Fasm {
-        emit_fasm_pe64_idata(&mut out, module);
-    }
-    emit_module_trailer(&mut out, module, target);
+struct SectionState {
+    active: Option<SectionKind>,
+    seg_base: String,
+    armnt_idx: usize,
+    armnt_prev_kind: Option<SectionKind>,
+    emitted_load_config: bool,
+    emitted_cfg_nop: bool,
+}
 
-    Ok(out)
+fn emit_coff32_load_config(out: &mut String, target: TargetAssembler) {
+    match target {
+        TargetAssembler::Nasm | TargetAssembler::Fasm => {
+            let _ = writeln!(
+                out,
+                "__load_config_used:{LF}    dd 72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}    dd ___safe_se_handler_table, ___safe_se_handler_count"
+            );
+        }
+        TargetAssembler::Jwasm => {
+            let _ = writeln!(
+                out,
+                "__load_config_used DD 72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, OFFSET ___safe_se_handler_table, ___safe_se_handler_count"
+            );
+        }
+        _ => {}
+    }
+}
+
+fn emit_coff64_cfg_nop(out: &mut String, target: TargetAssembler) {
+    match target {
+        TargetAssembler::Nasm | TargetAssembler::Fasm => {
+            let _ = writeln!(
+                out,
+                "__chkstk:{LF}    push rcx{LF}    push rax{LF}    lea rcx, [rsp + 24]{LF}__chkstk_lp:{LF}    cmp rax, 0x1000{LF}    jb __chkstk_tail{LF}    sub rcx, 0x1000{LF}    test byte [rcx], cl{LF}    sub rax, 0x1000{LF}    jmp __chkstk_lp{LF}__chkstk_tail:{LF}    sub rcx, rax{LF}    test byte [rcx], cl{LF}    pop rax{LF}    pop rcx{LF}    ret{LF}__wincmd_cfg_nop:{LF}    db 0xF3, 0x0F, 0x1E, 0xFA{LF}    ret"
+            );
+        }
+        TargetAssembler::Jwasm => {
+            let _ = writeln!(
+                out,
+                "__chkstk PROC{LF}    push rcx{LF}    push rax{LF}    lea rcx, [rsp + 24]{LF}__chkstk_lp:{LF}    cmp rax, 01000h{LF}    jb __chkstk_tail{LF}    sub rcx, 01000h{LF}    test BYTE PTR [rcx], cl{LF}    sub rax, 01000h{LF}    jmp __chkstk_lp{LF}__chkstk_tail:{LF}    sub rcx, rax{LF}    test BYTE PTR [rcx], cl{LF}    pop rax{LF}    pop rcx{LF}    ret{LF}__chkstk ENDP{LF}__wincmd_cfg_nop PROC{LF}    DB 0F3h, 0Fh, 1Eh, 0FAh{LF}    ret{LF}__wincmd_cfg_nop ENDP"
+            );
+        }
+        TargetAssembler::FasmArm | TargetAssembler::LlvmMc | TargetAssembler::ArmAsm => {}
+    }
+}
+
+fn collect_coff64_gfids(module: &CanonicalModule) -> Vec<&str> {
+    module
+        .items
+        .iter()
+        .filter_map(|it| {
+            if let TopItem::Global { symbol, .. } = it {
+                Some(symbol.as_str())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn emit_coff64_load_config(out: &mut String, module: &CanonicalModule, target: TargetAssembler) {
+    let globals = collect_coff64_gfids(module);
+    let gfids_cnt = globals.len() + 1;
+    match target {
+        TargetAssembler::Nasm => {
+            let _ = writeln!(
+                out,
+                "_load_config_used:{LF}    dd 256, 0, 0, 0, 0, 0{LF}    dq 0, 0, 0, 0, 0, 0{LF}    dd 0, 0{LF}    dq 0, 0, 0, 0{LF}    dq __wincmd_cfg_nop_ptr{LF}    dq 0{LF}    dq __guard_fids_table{LF}    dq __guard_fids_count{LF}    dd __guard_flags{LF}    dd 0, 0, 0{LF}    dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}__wincmd_cfg_nop_ptr:{LF}    dq __wincmd_cfg_nop"
+            );
+        }
+        TargetAssembler::Fasm => {
+            let _ = writeln!(
+                out,
+                "data 10{LF}_load_config_used:{LF}    dd 256, 0, 0, 0, 0, 0{LF}    dq 0, 0, 0, 0, 0, 0{LF}    dd 0, 0{LF}    dq 0, 0, 0, 0{LF}    dq __wincmd_cfg_nop_ptr{LF}    dq 0{LF}    dq __wincmd_gfids_table{LF}    dq {gfids_cnt}{LF}    dd 0x00000500, 0, 0, 0{LF}    dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}end data{LF}__wincmd_cfg_nop_ptr dq __wincmd_cfg_nop{LF}align 4{LF}__wincmd_gfids_table:"
+            );
+            let mut prev: Option<&str> = None;
+            for sym in globals.iter().copied().chain(std::iter::once("__wincmd_cfg_nop")) {
+                let _ = writeln!(out, "    dd rva {sym}");
+                if let Some(p) = prev {
+                    let _ = writeln!(out, "    assert rva {p} < rva {sym}");
+                }
+                prev = Some(sym);
+            }
+        }
+        TargetAssembler::Jwasm => {
+            let _ = writeln!(
+                out,
+                "_load_config_used DD 256, 0, 0, 0, 0, 0{LF}    DQ 0, 0, 0, 0, 0, 0{LF}    DD 0, 0{LF}    DQ 0, 0, 0, 0{LF}    DQ __wincmd_cfg_nop_ptr{LF}    DQ 0{LF}    DQ OFFSET __guard_fids_table{LF}    DQ __guard_fids_count{LF}    DD __guard_flags{LF}    DD 0, 0, 0{LF}    DQ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}__wincmd_cfg_nop_ptr DQ __wincmd_cfg_nop"
+            );
+        }
+        TargetAssembler::FasmArm | TargetAssembler::LlvmMc | TargetAssembler::ArmAsm => {}
+    }
+}
+
+fn emit_fasm_pe64_rsrc_and_reloc(out: &mut String) {
+    const MANIFEST_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1"><application><supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}"/><supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/><supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/><supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/><supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/></application></compatibility><application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings><longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware></windowsSettings></application></assembly>"#;
+    let _ = writeln!(
+        out,
+        "section {SQUOTE}.rsrc{SQUOTE} resource data readable{LF}    dd 0, 0, 0{LF}    dw 0, 1{LF}    dd 24, 0x80000018{LF}    dd 0, 0, 0{LF}    dw 0, 1{LF}    dd 1, 0x80000030{LF}    dd 0, 0, 0{LF}    dw 0, 1{LF}    dd 0x0409, 0x00000048{LF}    dd rva __wincmd_manifest_xml, __wincmd_manifest_end - __wincmd_manifest_xml, 65001, 0{LF}__wincmd_manifest_xml:{LF}    db {SQUOTE}{MANIFEST_XML}{SQUOTE}{LF}__wincmd_manifest_end:{LF}section {SQUOTE}.reloc{SQUOTE} fixups data readable discardable"
+    );
+}
+
+fn emit_arm_cfg_and_chkstk(out: &mut String, fmt: BinaryFormat, target: TargetAssembler) {
+    match (fmt, target) {
+        (BinaryFormat::ArmV7Pe, TargetAssembler::FasmArm) => {
+            let _ = writeln!(
+                out,
+                "__chkstk:{LF}    push {{r5, r6}}{LF}    lsl r5, r4, #2{LF}    mov r6, sp{LF}    add r6, r6, #8{LF}__chkstk_lp:{LF}    cmp r5, #0x1000{LF}    bcc __chkstk_tail{LF}    sub r6, r6, #0x1000{LF}    ldr r12, [r6]{LF}    sub r5, r5, #0x1000{LF}    b __chkstk_lp{LF}__chkstk_tail:{LF}    sub r6, r6, r5{LF}    ldr r12, [r6]{LF}    pop {{r5, r6}}{LF}    bx lr{LF}__chkstk__end:{LF}__wincmd_cfg_nop:{LF}    bx lr{LF}__wincmd_cfg_nop__end:"
+            );
+        }
+        (BinaryFormat::ArmV7Pe, TargetAssembler::LlvmMc) => {
+            let _ = writeln!(
+                out,
+                ".global __chkstk{LF}.thumb_func{LF}__chkstk:{LF}    push {{r5, r6}}{LF}    lsl r5, r4, #2{LF}    mov r6, sp{LF}    add r6, r6, #8{LF}.L__chkstk_lp:{LF}    cmp r5, #0x1000{LF}    bcc .L__chkstk_tail{LF}    sub r6, r6, #0x1000{LF}    ldr r12, [r6]{LF}    sub r5, r5, #0x1000{LF}    b .L__chkstk_lp{LF}.L__chkstk_tail:{LF}    sub r6, r6, r5{LF}    ldr r12, [r6]{LF}    pop {{r5, r6}}{LF}    bx lr{LF}.L__chkstk__end:{LF}.thumb_func{LF}__wincmd_cfg_nop:{LF}    bx lr{LF}.L__wincmd_cfg_nop__end:"
+            );
+        }
+        (BinaryFormat::Arm64Pe, TargetAssembler::FasmArm) => {
+            let _ = writeln!(
+                out,
+                "__chkstk:{LF}    lsl x16, x15, #4{LF}    mov x17, sp{LF}__chkstk_lp:{LF}    cmp x16, #0x1000{LF}    b.lo __chkstk_tail{LF}    sub x17, x17, #0x1000{LF}    ldr wzr, [x17]{LF}    sub x16, x16, #0x1000{LF}    b __chkstk_lp{LF}__chkstk_tail:{LF}    sub x17, x17, x16{LF}    ldr wzr, [x17]{LF}    ret{LF}__chkstk__end:{LF}__wincmd_cfg_nop:{LF}    hint #34{LF}    ret{LF}__wincmd_cfg_nop__end:"
+            );
+        }
+        (BinaryFormat::Arm64Pe, TargetAssembler::LlvmMc) => {
+            let _ = writeln!(
+                out,
+                ".global __chkstk{LF}__chkstk:{LF}    lsl x16, x15, #4{LF}    mov x17, sp{LF}.L__chkstk_lp:{LF}    cmp x16, #0x1000{LF}    b.lo .L__chkstk_tail{LF}    sub x17, x17, #0x1000{LF}    ldr wzr, [x17]{LF}    sub x16, x16, #0x1000{LF}    b .L__chkstk_lp{LF}.L__chkstk_tail:{LF}    sub x17, x17, x16{LF}    ldr wzr, [x17]{LF}    ret{LF}.L__chkstk__end:{LF}__wincmd_cfg_nop:{LF}    hint #34{LF}    ret{LF}.L__wincmd_cfg_nop__end:"
+            );
+        }
+        _ => {}
+    }
+}
+
+fn emit_arm_load_config(out: &mut String, module: &CanonicalModule, target: TargetAssembler) {
+    let globals = collect_coff64_gfids(module);
+    let gfids_cnt = globals.len() + 1;
+    match (module.format, target) {
+        (BinaryFormat::ArmV7Pe, TargetAssembler::FasmArm) => {
+            let _ = writeln!(
+                out,
+                "align 4{LF}__armnt_loadcfg_rva = $ - 0x00400000{LF}_load_config_used:{LF}    dw 160{LF}    times 17 dw 0{LF}    dw __wincmd_cfg_nop_ptr{LF}    dw 0{LF}    dw __wincmd_gfids_table{LF}    dw {gfids_cnt}{LF}    dw 0x00000500{LF}    times 17 dw 0{LF}__wincmd_cfg_nop_ptr:{LF}    dw (__wincmd_cfg_nop or 1){LF}__wincmd_gfids_table:"
+            );
+            for sym in globals.iter().copied().chain(std::iter::once("__wincmd_cfg_nop")) {
+                let _ = writeln!(out, "    dw (({sym} - 0x00400000) and 0xFFFFFFFE)");
+            }
+        }
+        (BinaryFormat::ArmV7Pe, TargetAssembler::LlvmMc) => {
+            let _ = writeln!(
+                out,
+                ".p2align 2{LF}_load_config_used:{LF}    .long 160{LF}    .long 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}    .long __wincmd_cfg_nop_ptr{LF}    .long 0{LF}    .long __guard_fids_table{LF}    .long __guard_fids_count{LF}    .long __guard_flags{LF}    .long 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}__wincmd_cfg_nop_ptr:{LF}    .long __wincmd_cfg_nop"
+            );
+        }
+        (BinaryFormat::Arm64Pe, TargetAssembler::FasmArm) => {
+            let _ = writeln!(
+                out,
+                "align 8{LF}data 10{LF}_load_config_used:{LF}    dw 256, 0, 0, 0, 0, 0{LF}    dd 0, 0, 0, 0, 0, 0{LF}    dw 0, 0{LF}    dd 0, 0, 0, 0{LF}    dd __wincmd_cfg_nop_ptr{LF}    dd 0{LF}    dd __wincmd_gfids_table{LF}    dd {gfids_cnt}{LF}    dw 0x00000500, 0, 0, 0{LF}    dd 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}end data{LF}__wincmd_cfg_nop_ptr dd __wincmd_cfg_nop{LF}align 4{LF}__wincmd_gfids_table:"
+            );
+            for sym in globals.iter().copied().chain(std::iter::once("__wincmd_cfg_nop")) {
+                let _ = writeln!(out, "    dw rva {sym}");
+            }
+        }
+        (BinaryFormat::Arm64Pe, TargetAssembler::LlvmMc) => {
+            let _ = writeln!(
+                out,
+                ".p2align 3{LF}_load_config_used:{LF}    .long 256, 0, 0, 0, 0, 0{LF}    .quad 0, 0, 0, 0, 0, 0{LF}    .long 0, 0{LF}    .quad 0, 0, 0, 0{LF}    .quad __wincmd_cfg_nop_ptr{LF}    .quad 0{LF}    .quad __guard_fids_table{LF}    .quad __guard_fids_count{LF}    .long __guard_flags, 0, 0, 0{LF}    .quad 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}__wincmd_cfg_nop_ptr:{LF}    .quad __wincmd_cfg_nop"
+            );
+        }
+        _ => {}
+    }
+}
+
+fn switch_module_section(
+    out: &mut String,
+    state: &mut SectionState,
+    module: &CanonicalModule,
+    kind: SectionKind,
+    target: TargetAssembler,
+    span: &SourceSpan,
+) -> Result<(), ToolError> {
+    let fmt = module.format;
+    if state.active == Some(SectionKind::Text) && kind != SectionKind::Text && !state.emitted_cfg_nop
+    {
+        if fmt == BinaryFormat::Coff64 {
+            emit_coff64_cfg_nop(out, target);
+            state.emitted_cfg_nop = true;
+        } else if matches!(fmt, BinaryFormat::ArmV7Pe | BinaryFormat::Arm64Pe) {
+            emit_arm_cfg_and_chkstk(out, fmt, target);
+            state.emitted_cfg_nop = true;
+        }
+    }
+    close_open_section(out, fmt, state.active, target);
+    if matches!(fmt, BinaryFormat::ArmV4Pe | BinaryFormat::ArmV7Pe)
+        && target == TargetAssembler::FasmArm
+    {
+        let base = if fmt == BinaryFormat::ArmV4Pe {
+            "0x00010000"
+        } else {
+            "0x00400000"
+        };
+        if let Some(prev_k) = state.armnt_prev_kind {
+            close_fasmarm_pe32_section(out, state.armnt_idx - 1, prev_k);
+        }
+        open_fasmarm_pe32_section(out, fmt, kind, state.armnt_idx, base);
+        state.armnt_prev_kind = Some(kind);
+        state.armnt_idx += 1;
+        state.seg_base = String::from("wincmd_seg_base");
+    } else {
+        state.seg_base = open_section(out, fmt, kind, target, span)?;
+    }
+    if fmt == BinaryFormat::Coff32
+        && kind == SectionKind::Rdata
+        && module.safeseh.is_some()
+        && !state.emitted_load_config
+    {
+        emit_coff32_load_config(out, target);
+        state.emitted_load_config = true;
+    }
+    if fmt == BinaryFormat::Coff64 && kind == SectionKind::Rdata && !state.emitted_load_config {
+        emit_coff64_load_config(out, module, target);
+        state.emitted_load_config = true;
+    }
+    if matches!(fmt, BinaryFormat::ArmV7Pe | BinaryFormat::Arm64Pe)
+        && kind == SectionKind::Rdata
+        && !state.emitted_load_config
+    {
+        emit_arm_load_config(out, module, target);
+        state.emitted_load_config = true;
+    }
+    state.active = Some(kind);
+    Ok(())
+}
+
+fn finalize_module_sections(
+    out: &mut String,
+    module: &CanonicalModule,
+    state: &mut SectionState,
+    win64_frames: &[(String, u32, Vec<String>)],
+    target: TargetAssembler,
+) {
+    if state.active == Some(SectionKind::Text) && !state.emitted_cfg_nop {
+        if module.format == BinaryFormat::Coff64 {
+            emit_coff64_cfg_nop(out, target);
+            state.emitted_cfg_nop = true;
+        } else if matches!(module.format, BinaryFormat::ArmV7Pe | BinaryFormat::Arm64Pe) {
+            emit_arm_cfg_and_chkstk(out, module.format, target);
+            state.emitted_cfg_nop = true;
+        }
+    }
+    close_open_section(out, module.format, state.active, target);
+    if module.format == BinaryFormat::Coff32 && module.safeseh.is_some() {
+        if !state.emitted_load_config {
+            emit_standard_section(out, BinaryFormat::Coff32, SectionKind::Rdata, target);
+            emit_coff32_load_config(out, target);
+        }
+        if target == TargetAssembler::Fasm {
+            let _ = writeln!(out, "section {SQUOTE}.sxdata{SQUOTE} linkinfo{LF}    dd 1");
+        }
+    }
+    if matches!(module.format, BinaryFormat::ArmV4Pe | BinaryFormat::ArmV7Pe) {
+        finalize_arm32_pe_sections(out, module, state, win64_frames, target);
+    }
+    if module.format == BinaryFormat::Arm64Pe {
+        finalize_arm64_pe_sections(out, module, state, win64_frames, target);
+    }
+    if module.format == BinaryFormat::Coff64 {
+        if !state.emitted_cfg_nop {
+            emit_standard_section(out, BinaryFormat::Coff64, SectionKind::Text, target);
+            emit_coff64_cfg_nop(out, target);
+            state.emitted_cfg_nop = true;
+        }
+        if !state.emitted_load_config {
+            emit_standard_section(out, BinaryFormat::Coff64, SectionKind::Rdata, target);
+            emit_coff64_load_config(out, module, target);
+            state.emitted_load_config = true;
+        }
+        if !win64_frames.is_empty() {
+            emit_win64_unwind_tables(out, win64_frames, target);
+        }
+        if target == TargetAssembler::Fasm {
+            emit_fasm_pe64_idata(out, module);
+            emit_fasm_pe64_rsrc_and_reloc(out);
+        }
+    }
 }
 
 const fn comment_prefix(target: TargetAssembler) -> &'static str {
@@ -217,20 +529,20 @@ fn emit_x86_preamble(
             emit_jwasm_cpu(out, module.cpu);
             let _ = writeln!(out, "OPTION CASEMAP:NONE");
         }
-        (BinaryFormat::Coff32, TargetAssembler::Nasm) => {
-            let _ = writeln!(out, "CPU 386{LF}BITS 32");
-        }
-        (BinaryFormat::Coff32, TargetAssembler::Fasm) => {
-            let _ = writeln!(out, "format MS COFF");
-        }
-        (BinaryFormat::Coff32, TargetAssembler::Jwasm) => {
-            let _ = writeln!(out, ".386{LF}.MODEL FLAT, SYSCALL{LF}OPTION CASEMAP:NONE");
+        (BinaryFormat::Coff32, _) => {
+            return emit_coff32_preamble(out, module, target, span);
         }
         (BinaryFormat::Coff64, TargetAssembler::Nasm) => {
-            let _ = writeln!(out, "CPU X64{LF}BITS 64{LF}DEFAULT REL");
+            let _ = writeln!(
+                out,
+                "CPU X64{LF}BITS 64{LF}DEFAULT REL{LF}GLOBAL @feat.00{LF}@feat.00 equ 0x2000{LF}GLOBAL _load_config_used{LF}GLOBAL __wincmd_cfg_nop:function{LF}EXTERN __guard_fids_table{LF}EXTERN __guard_fids_count{LF}EXTERN __guard_flags"
+            );
         }
         (BinaryFormat::Coff64, TargetAssembler::Fasm) => {
-            let _ = writeln!(out, "format PE64 console 5.02 at 140000000h");
+            let _ = writeln!(
+                out,
+                "format PE64 console 5.02 NX at 140000000h{LF}stack 1048576, 65536"
+            );
             let entry_sym = module.entry.as_deref().or_else(|| {
                 module.items.iter().find_map(|it| {
                     if let TopItem::Global { symbol, .. } = it {
@@ -245,7 +557,10 @@ fn emit_x86_preamble(
             }
         }
         (BinaryFormat::Coff64, TargetAssembler::Jwasm) => {
-            let _ = writeln!(out, ".x64{LF}OPTION CASEMAP:NONE");
+            let _ = writeln!(
+                out,
+                ".x64{LF}OPTION CASEMAP:NONE{LF}PUBLIC _load_config_used{LF}PUBLIC __wincmd_cfg_nop{LF}EXTRN __guard_fids_table:BYTE{LF}EXTRN __guard_fids_count:ABS{LF}EXTRN __guard_flags:ABS"
+            );
         }
         _ => {
             return Err(ToolError::Lowering {
@@ -261,6 +576,60 @@ fn emit_x86_preamble(
     Ok(())
 }
 
+fn emit_coff32_preamble(
+    out: &mut String,
+    module: &CanonicalModule,
+    target: TargetAssembler,
+    span: SourceSpan,
+) -> Result<(), ToolError> {
+    let safeseh = module.safeseh.as_deref();
+    match target {
+        TargetAssembler::Nasm => {
+            let _ = writeln!(out, "CPU 386{LF}BITS 32");
+            if let Some(seh) = safeseh {
+                let _ = writeln!(
+                    out,
+                    "GLOBAL __load_config_used{LF}EXTERN ___safe_se_handler_table{LF}EXTERN ___safe_se_handler_count{LF}safeseh {seh}"
+                );
+            }
+            Ok(())
+        }
+        TargetAssembler::Fasm => {
+            let _ = writeln!(out, "format MS COFF");
+            if let Some(seh) = safeseh {
+                let _ = writeln!(
+                    out,
+                    "@feat_val = 1{LF}public @feat_val as {SQUOTE}@feat.00{SQUOTE}{LF}public {seh}{LF}public __load_config_used{LF}extrn {SQUOTE}___safe_se_handler_table{SQUOTE} as ___safe_se_handler_table:dword{LF}extrn {SQUOTE}___safe_se_handler_count{SQUOTE} as ___safe_se_handler_count:dword"
+                );
+            }
+            Ok(())
+        }
+        TargetAssembler::Jwasm => {
+            let _ = writeln!(
+                out,
+                ".386{LF}.MODEL FLAT, SYSCALL{LF}OPTION CASEMAP:NONE{LF}ASSUME FS:NOTHING"
+            );
+            if let Some(seh) = safeseh {
+                let _ = writeln!(
+                    out,
+                    "PUBLIC __load_config_used{LF}EXTRN ___safe_se_handler_table:DWORD{LF}EXTRN ___safe_se_handler_count:ABS{LF}{seh} PROTO{LF}.SAFESEH {seh}"
+                );
+            }
+            Ok(())
+        }
+        TargetAssembler::FasmArm | TargetAssembler::LlvmMc | TargetAssembler::ArmAsm => {
+            Err(ToolError::Lowering {
+                span,
+                assembler: target,
+                message: format!(
+                    "unsupported format `{:?}` for assembler `{target}`",
+                    module.format
+                ),
+            })
+        }
+    }
+}
+
 fn emit_arm_preamble(
     out: &mut String,
     module: &CanonicalModule,
@@ -269,14 +638,7 @@ fn emit_arm_preamble(
     let span = SourceSpan::new(&module.file_path, 1, 1);
     match (module.format, target) {
         (BinaryFormat::ArmV4Pe, TargetAssembler::FasmArm) => {
-            let _ = writeln!(out, "format PE GUI 4.0");
-            if let Some(ent) = &module.entry {
-                let _ = writeln!(out, "entry {ent}");
-            }
-            let _ = writeln!(
-                out,
-                "code32{LF}processor CPU32_V1 + CPU32_V2 + CPU32_V3 + CPU32_M + CPU32_V4 + CPU32_V4T"
-            );
+            emit_fasmarm_pe32_header(out, module, false);
         }
         (BinaryFormat::ArmV4Pe, TargetAssembler::LlvmMc) => {
             let _ = writeln!(out, ".syntax unified{LF}.arm");
@@ -285,29 +647,34 @@ fn emit_arm_preamble(
             let _ = writeln!(out, "    ARM");
         }
         (BinaryFormat::ArmV7Pe, TargetAssembler::FasmArm) => {
-            let _ = writeln!(out, "format PE console 6.02 at 00400000h");
-            if let Some(ent) = &module.entry {
-                let _ = writeln!(out, "entry {ent}");
-            }
-            let _ = writeln!(
-                out,
-                "code16{LF}processor CPU32_V1 + CPU32_V2 + CPU32_V3 + CPU32_M + CPU32_V4 + CPU32_V4T + CPU32_V5 + CPU32_V6 + CPU32_6M + CPU32_7M + CPU32_T2 + CPU32_V7 + CPU32_SYNC + CPU32_DIV"
-            );
+            emit_fasmarm_pe32_header(out, module, true);
         }
         (BinaryFormat::ArmV7Pe, TargetAssembler::LlvmMc) => {
-            let _ = writeln!(out, ".syntax unified{LF}.thumb");
+            let _ = writeln!(
+                out,
+                ".syntax unified{LF}.thumb{LF}.set __WINCMD_THUMB2, 1{LF}.global \"@feat.00\"{LF}.set \"@feat.00\", 0x0800{LF}.global _load_config_used{LF}.global __wincmd_cfg_nop{LF}.extern __guard_fids_table{LF}.extern __guard_fids_count{LF}.extern __guard_flags"
+            );
         }
         (BinaryFormat::ArmV7Pe, TargetAssembler::ArmAsm) => {
             let _ = writeln!(out, "    THUMB");
         }
         (BinaryFormat::Arm64Pe, TargetAssembler::FasmArm) => {
-            let _ = writeln!(out, "format PE64 console 10.0 at 140000000h");
+            let _ = writeln!(
+                out,
+                "format PE64 console 10.0 NX at 140000000h{LF}stack 1048576, 65536"
+            );
             if let Some(ent) = &module.entry {
                 let _ = writeln!(out, "entry {ent}");
             }
             let _ = writeln!(out, "processor CPU64_V8");
         }
-        (BinaryFormat::Arm64Pe, TargetAssembler::LlvmMc | TargetAssembler::ArmAsm) => {}
+        (BinaryFormat::Arm64Pe, TargetAssembler::LlvmMc) => {
+            let _ = writeln!(
+                out,
+                ".global \"@feat.00\"{LF}.set \"@feat.00\", 0x0800{LF}.global _load_config_used{LF}.global __wincmd_cfg_nop{LF}.extern __guard_fids_table{LF}.extern __guard_fids_count{LF}.extern __guard_flags"
+            );
+        }
+        (BinaryFormat::Arm64Pe, TargetAssembler::ArmAsm) => {}
         _ => {
             return Err(ToolError::Lowering {
                 span,
@@ -320,6 +687,529 @@ fn emit_arm_preamble(
         }
     }
     Ok(())
+}
+
+fn collect_pe_imp_names(module: &CanonicalModule) -> Vec<&str> {
+    module
+        .items
+        .iter()
+        .filter_map(|it| {
+            if let TopItem::Extern { symbol, .. } = it {
+                symbol.strip_prefix("__imp_")
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn emit_fasmarm_pe32_header(out: &mut String, module: &CanonicalModule, is_v7: bool) {
+    let mut user_secs: Vec<SectionKind> = module
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            TopItem::Section { kind, .. } => Some(*kind),
+            _ => None,
+        })
+        .collect();
+    if user_secs.is_empty() {
+        user_secs.push(SectionKind::Text);
+    }
+    let need_synth_rdata = is_v7 && !user_secs.contains(&SectionKind::Rdata);
+    let has_imps = !collect_pe_imp_names(module).is_empty();
+    let synth_cnt = usize::from(need_synth_rdata)
+        + usize::from(has_imps)
+        + 1
+        + if is_v7 { 2 } else { 0 };
+    let nsec = user_secs.len() + synth_cnt;
+
+    let (base, mach, os_maj, os_min, subsys, dll_chars) = if is_v7 {
+        ("0x00400000", "0x01C4", 6, 2, 3, "0x4140")
+    } else {
+        ("0x00010000", "0x01C0", 4, 0, 9, "0x0000")
+    };
+    let entry_expr = module.entry.as_ref().map_or_else(
+        || String::from(if is_v7 { "0x1001" } else { "0x1000" }),
+        |ent| {
+            if is_v7 {
+                format!("((__armnt_text_rva + ({ent} - __armnt_text_base)) or 1)")
+            } else {
+                format!("(__armnt_text_rva + ({ent} - __armnt_text_base))")
+            }
+        },
+    );
+    let code_rsize_expr = user_secs
+        .iter()
+        .position(|k| *k == SectionKind::Text)
+        .map_or_else(|| String::from("0"), |i| format!("__armnt_sec_{i}_rsize"));
+
+    let _ = writeln!(out, "format binary as 'exe'{LF}org {base}");
+    if is_v7 {
+        let _ = writeln!(
+            out,
+            "__WINCMD_THUMB2 = 1{LF}code16{LF}processor CPU32_V1 + CPU32_V2 + CPU32_A + CPU32_V3 + CPU32_M + CPU32_V4 + CPU32_V4T + CPU32_V5 + CPU32_V5T + CPU32_E + CPU32_V6 + CPU32_V6T + CPU32_K + CPU32_6M + CPU32_7M + CPU32_T2 + CPU32_V7 + CPU32_MP + CPU32_SYNC + CPU32_DIV"
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "code32{LF}processor CPU32_V1 + CPU32_V2 + CPU32_V3 + CPU32_M + CPU32_V4 + CPU32_V4T"
+        );
+    }
+    let _ = writeln!(
+        out,
+        "dh 0x5A4D{LF}times 29 dh 0{LF}dw 0x00000040{LF}db 'PE', 0, 0{LF}dh {mach}, {nsec}{LF}dw 0, 0, 0{LF}dh 0x00E0, 0x0102"
+    );
+    let _ = writeln!(
+        out,
+        "dh 0x010B{LF}db 14, 0{LF}dw {code_rsize_expr}, 0, 0, {entry_expr}, 0x1000, 0x2000, {base}, 0x1000, 0x0200"
+    );
+    let _ = writeln!(
+        out,
+        "dh {os_maj}, {os_min}, 0, 0, {os_maj}, {os_min}{LF}dw 0, __armnt_image_size, 0x0400, 0{LF}dh {subsys}, {dll_chars}{LF}dw 0x100000, 0x10000, 0x100000, 0x4000, 0, 16"
+    );
+    emit_fasmarm_pe32_datadirs_and_sechdrs(out, &user_secs, need_synth_rdata, has_imps, is_v7);
+}
+
+fn emit_fasmarm_pe32_datadirs_and_sechdrs(
+    out: &mut String,
+    user_secs: &[SectionKind],
+    need_synth_rdata: bool,
+    has_imps: bool,
+    is_v7: bool,
+) {
+    let imp_dd = if has_imps {
+        "__armnt_idata_rva, __armnt_idata_vsize"
+    } else {
+        "0, 0"
+    };
+    let rsrc_dd = if is_v7 {
+        "__armnt_rsrc_rva, __armnt_rsrc_vsize"
+    } else {
+        "0, 0"
+    };
+    let reloc_dd = if is_v7 {
+        "__armnt_reloc_rva, __armnt_reloc_vsize"
+    } else {
+        "0, 0"
+    };
+    let lcfg_dd = if is_v7 {
+        "__armnt_loadcfg_rva, 160"
+    } else {
+        "0, 0"
+    };
+    let _ = writeln!(
+        out,
+        "dw 0, 0, {imp_dd}, {rsrc_dd}, __armnt_pdata_rva, __armnt_pdata_vsize, 0, 0, {reloc_dd}"
+    );
+    let _ = writeln!(
+        out,
+        "dw 0, 0, 0, 0, 0, 0, 0, 0, {lcfg_dd}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0"
+    );
+
+    let mut idx = 0_usize;
+    for kind in user_secs {
+        emit_fasmarm_pe32_sechdr_row(out, idx, *kind);
+        idx += 1;
+    }
+    if need_synth_rdata {
+        emit_fasmarm_pe32_sechdr_row(out, idx, SectionKind::Rdata);
+        idx += 1;
+    }
+    if has_imps {
+        emit_fasmarm_pe32_named_sechdr(out, idx, "'.idata', 0, 0", "0xC0000040");
+        idx += 1;
+    }
+    emit_fasmarm_pe32_named_sechdr(out, idx, "'.pdata', 0, 0", "0x40000040");
+    idx += 1;
+    if is_v7 {
+        emit_fasmarm_pe32_named_sechdr(out, idx, "'.rsrc', 0, 0, 0", "0x40000040");
+        idx += 1;
+        emit_fasmarm_pe32_named_sechdr(out, idx, "'.reloc', 0, 0", "0x42000040");
+    }
+}
+
+fn emit_fasmarm_pe32_sechdr_row(out: &mut String, idx: usize, kind: SectionKind) {
+    if kind == SectionKind::Bss {
+        let _ = writeln!(
+            out,
+            "db '.bss', 0, 0, 0, 0{LF}dw __armnt_sec_{idx}_vsize, __armnt_sec_{idx}_rva, 0, 0, 0, 0{LF}dh 0, 0{LF}dw 0xC0000080"
+        );
+        return;
+    }
+    let (name8, chars) = match kind {
+        SectionKind::Text => ("'.text', 0, 0, 0", "0x60000020"),
+        SectionKind::Rdata => ("'.rdata', 0, 0", "0x40000040"),
+        SectionKind::Data => ("'.data', 0, 0, 0", "0xC0000040"),
+        _ => ("'.sec', 0, 0, 0, 0", "0x40000040"),
+    };
+    emit_fasmarm_pe32_named_sechdr(out, idx, name8, chars);
+}
+
+fn emit_fasmarm_pe32_named_sechdr(out: &mut String, idx: usize, name8: &str, chars: &str) {
+    let _ = writeln!(
+        out,
+        "db {name8}{LF}dw __armnt_sec_{idx}_vsize, __armnt_sec_{idx}_rva, __armnt_sec_{idx}_rsize, __armnt_sec_{idx}_fptr, 0, 0{LF}dh 0, 0{LF}dw {chars}"
+    );
+}
+
+fn open_fasmarm_pe32_section(
+    out: &mut String,
+    fmt: BinaryFormat,
+    kind: SectionKind,
+    idx: usize,
+    base: &str,
+) {
+    if idx == 0 {
+        let _ = writeln!(
+            out,
+            "times (0x0400 - ($ - $$)) db 0{LF}__armnt_sec_0_rva = 0x1000{LF}__armnt_sec_0_fptr = 0x0400"
+        );
+    } else {
+        let prev = idx - 1;
+        let _ = writeln!(
+            out,
+            "__armnt_sec_{idx}_rva = __armnt_sec_{prev}_rva + __armnt_sec_{prev}_vspan{LF}__armnt_sec_{idx}_fptr = __armnt_sec_{prev}_fptr + __armnt_sec_{prev}_rsize"
+        );
+    }
+    if kind == SectionKind::Bss {
+        let _ = writeln!(
+            out,
+            "virtual at {base} + __armnt_sec_{idx}_rva{LF}__armnt_sec_{idx}_start:"
+        );
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "org {base} + __armnt_sec_{idx}_rva{LF}__armnt_sec_{idx}_start:"
+    );
+    if kind == SectionKind::Text {
+        let mode = if fmt == BinaryFormat::ArmV7Pe {
+            "thumb"
+        } else {
+            "code32"
+        };
+        let _ = writeln!(
+            out,
+            "__armnt_text_rva = __armnt_sec_{idx}_rva{LF}__armnt_text_base:{LF}{mode}"
+        );
+    }
+}
+
+fn close_fasmarm_pe32_section(out: &mut String, idx: usize, kind: SectionKind) {
+    let _ = writeln!(out, "__armnt_sec_{idx}_vsize = $ - __armnt_sec_{idx}_start");
+    let _ = writeln!(
+        out,
+        "if __armnt_sec_{idx}_vsize = 0{LF}    __armnt_sec_{idx}_vspan = 0x1000{LF}else{LF}    __armnt_sec_{idx}_vspan = (__armnt_sec_{idx}_vsize + 0x0FFF) and 0xFFFFF000{LF}end if"
+    );
+    if kind == SectionKind::Bss {
+        let _ = writeln!(out, "end virtual{LF}__armnt_sec_{idx}_rsize = 0");
+    } else {
+        let _ = writeln!(
+            out,
+            "times ((512 - (__armnt_sec_{idx}_vsize mod 512)) mod 512) db 0{LF}__armnt_sec_{idx}_rsize = $ - __armnt_sec_{idx}_start"
+        );
+    }
+}
+
+fn finalize_arm32_pe_sections(
+    out: &mut String,
+    module: &CanonicalModule,
+    state: &mut SectionState,
+    arm_procs: &[(String, u32, Vec<String>)],
+    target: TargetAssembler,
+) {
+    let fmt = module.format;
+    let is_v7 = fmt == BinaryFormat::ArmV7Pe;
+    if target == TargetAssembler::LlvmMc {
+        if is_v7 {
+            if !state.emitted_cfg_nop {
+                emit_standard_section(out, fmt, SectionKind::Text, target);
+                emit_arm_cfg_and_chkstk(out, fmt, target);
+                state.emitted_cfg_nop = true;
+            }
+            if !state.emitted_load_config {
+                emit_standard_section(out, fmt, SectionKind::Rdata, target);
+                emit_arm_load_config(out, module, target);
+                state.emitted_load_config = true;
+            }
+            emit_llvm_arm_pdata(out, module, arm_procs, true);
+        }
+        return;
+    }
+    if target != TargetAssembler::FasmArm {
+        return;
+    }
+    let base = if is_v7 { "0x00400000" } else { "0x00010000" };
+    if state.armnt_idx == 0 {
+        open_fasmarm_pe32_section(out, fmt, SectionKind::Text, 0, base);
+        if is_v7 {
+            emit_arm_cfg_and_chkstk(out, fmt, target);
+            state.emitted_cfg_nop = true;
+        }
+        state.armnt_prev_kind = Some(SectionKind::Text);
+        state.armnt_idx = 1;
+    }
+    if is_v7 && !state.emitted_load_config {
+        if let Some(pk) = state.armnt_prev_kind {
+            close_fasmarm_pe32_section(out, state.armnt_idx - 1, pk);
+        }
+        open_fasmarm_pe32_section(out, fmt, SectionKind::Rdata, state.armnt_idx, base);
+        emit_arm_load_config(out, module, target);
+        state.emitted_load_config = true;
+        state.armnt_prev_kind = Some(SectionKind::Rdata);
+        state.armnt_idx += 1;
+    }
+    emit_fasmarm_pe32_synth_tails(out, module, state, arm_procs, base, is_v7);
+}
+
+fn emit_fasmarm_pe32_synth_tails(
+    out: &mut String,
+    module: &CanonicalModule,
+    state: &mut SectionState,
+    arm_procs: &[(String, u32, Vec<String>)],
+    base: &str,
+    is_v7: bool,
+) {
+    let imps = collect_pe_imp_names(module);
+    if !imps.is_empty() {
+        if let Some(pk) = state.armnt_prev_kind {
+            close_fasmarm_pe32_section(out, state.armnt_idx - 1, pk);
+        }
+        let idx = state.armnt_idx;
+        open_fasmarm_pe32_section(out, module.format, SectionKind::Data, idx, base);
+        let dll = if is_v7 { "KERNEL32.dll" } else { "COREDLL.dll" };
+        emit_fasmarm_pe32_idata_body(out, &imps, base, dll, idx);
+        state.armnt_prev_kind = Some(SectionKind::Data);
+        state.armnt_idx += 1;
+    }
+
+    if let Some(pk) = state.armnt_prev_kind {
+        close_fasmarm_pe32_section(out, state.armnt_idx - 1, pk);
+    }
+    let pidx = state.armnt_idx;
+    open_fasmarm_pe32_section(out, module.format, SectionKind::Rdata, pidx, base);
+    emit_fasmarm_pe32_pdata_body(out, arm_procs, pidx, is_v7);
+    state.armnt_prev_kind = Some(SectionKind::Rdata);
+    state.armnt_idx += 1;
+
+    if is_v7 {
+        if let Some(pk) = state.armnt_prev_kind {
+            close_fasmarm_pe32_section(out, state.armnt_idx - 1, pk);
+        }
+        let ridx = state.armnt_idx;
+        open_fasmarm_pe32_section(out, module.format, SectionKind::Rdata, ridx, base);
+        emit_fasmarm_pe32_rsrc_body(out, base, ridx);
+        close_fasmarm_pe32_section(out, ridx, SectionKind::Rdata);
+        state.armnt_idx += 1;
+
+        let xidx = state.armnt_idx;
+        open_fasmarm_pe32_section(out, module.format, SectionKind::Rdata, xidx, base);
+        let _ = writeln!(
+            out,
+            "__armnt_reloc_rva = __armnt_sec_{xidx}_rva{LF}    dw 0x1000, 8{LF}__armnt_reloc_vsize = 8"
+        );
+        close_fasmarm_pe32_section(out, xidx, SectionKind::Rdata);
+        state.armnt_prev_kind = None;
+        state.armnt_idx += 1;
+    } else if let Some(pk) = state.armnt_prev_kind {
+        close_fasmarm_pe32_section(out, state.armnt_idx - 1, pk);
+        state.armnt_prev_kind = None;
+    }
+    let last = state.armnt_idx - 1;
+    let _ = writeln!(
+        out,
+        "__armnt_image_size = __armnt_sec_{last}_rva + __armnt_sec_{last}_vspan"
+    );
+}
+
+fn emit_fasmarm_pe32_idata_body(
+    out: &mut String,
+    imps: &[&str],
+    base: &str,
+    dll: &str,
+    idx: usize,
+) {
+    let _ = writeln!(
+        out,
+        "__armnt_idata_rva = __armnt_sec_{idx}_rva{LF}    dw (__armnt_ilt - {base}), 0, 0, (__armnt_dll_name - {base}), (__armnt_iat - {base}){LF}    dw 0, 0, 0, 0, 0{LF}__armnt_ilt:"
+    );
+    for api in imps {
+        let _ = writeln!(out, "    dw (__armnt_hn_{api} - {base})");
+    }
+    let _ = writeln!(out, "    dw 0{LF}__armnt_iat:");
+    for api in imps {
+        let _ = writeln!(out, "__imp_{api}:{LF}    dw (__armnt_hn_{api} - {base})");
+    }
+    let _ = writeln!(
+        out,
+        "    dw 0{LF}__armnt_dll_name:{LF}    db '{dll}', 0"
+    );
+    for api in imps {
+        let _ = writeln!(
+            out,
+            "    align 2{LF}__armnt_hn_{api}:{LF}    dh 0{LF}    db '{api}', 0"
+        );
+    }
+    let _ = writeln!(out, "__armnt_idata_vsize = $ - __armnt_sec_{idx}_start");
+}
+
+fn emit_fasmarm_pe32_pdata_body(
+    out: &mut String,
+    arm_procs: &[(String, u32, Vec<String>)],
+    idx: usize,
+    is_v7: bool,
+) {
+    let _ = writeln!(out, "__armnt_pdata_rva = __armnt_sec_{idx}_rva");
+    for (name, _, _) in arm_procs {
+        if is_v7 {
+            let _ = writeln!(
+                out,
+                "    dw ((__armnt_text_rva + ({name} - __armnt_text_base)) or 1){LF}    dw (0x00004001 or (((({name}__end - {name}) / 2) and 0x7FF) shl 2))"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "    dw (0x00010000 + __armnt_text_rva + ({name} - __armnt_text_base)){LF}    dw ((1 shl 30) or (((({name}__end - {name}) / 4) and 0x3FFFFF) shl 8) or 2)"
+            );
+        }
+    }
+    if is_v7 {
+        for sym in ["__chkstk", "__wincmd_cfg_nop"] {
+            let _ = writeln!(
+                out,
+                "    dw ((__armnt_text_rva + ({sym} - __armnt_text_base)) or 1){LF}    dw (0x00004001 or (((({sym}__end - {sym}) / 2) and 0x7FF) shl 2))"
+            );
+        }
+    } else if arm_procs.is_empty() {
+        let _ = writeln!(out, "    dw 0x00011000, 0x40000102");
+    }
+    let _ = writeln!(out, "__armnt_pdata_vsize = $ - __armnt_sec_{idx}_start");
+}
+
+fn emit_fasmarm_pe32_rsrc_body(out: &mut String, base: &str, idx: usize) {
+    const MANIFEST_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1"><application><supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}"/><supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/><supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/><supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/><supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/></application></compatibility><application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings><longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware></windowsSettings></application></assembly>"#;
+    let _ = writeln!(
+        out,
+        "__armnt_rsrc_rva = __armnt_sec_{idx}_rva{LF}    dw 0, 0, 0{LF}    dh 0, 1{LF}    dw 24, 0x80000018{LF}    dw 0, 0, 0{LF}    dh 0, 1{LF}    dw 1, 0x80000030{LF}    dw 0, 0, 0{LF}    dh 0, 1{LF}    dw 0x0409, 0x00000048{LF}    dw (__wincmd_manifest_xml - {base}), (__wincmd_manifest_end - __wincmd_manifest_xml), 65001, 0{LF}__wincmd_manifest_xml:{LF}    db {SQUOTE}{MANIFEST_XML}{SQUOTE}{LF}__wincmd_manifest_end:{LF}__armnt_rsrc_vsize = $ - __armnt_sec_{idx}_start"
+    );
+}
+
+fn emit_llvm_arm_pdata(
+    out: &mut String,
+    module: &CanonicalModule,
+    arm_procs: &[(String, u32, Vec<String>)],
+    is_v7: bool,
+) {
+    let _ = writeln!(out, r#".section .pdata,"dr""#);
+    let _ = writeln!(out, ".p2align 2");
+    if is_v7 {
+        if arm_procs.is_empty() {
+            for name in module.items.iter().filter_map(|it| match it {
+                TopItem::Proc { name, .. } => Some(name.as_str()),
+                _ => None,
+            }) {
+                let _ = writeln!(
+                    out,
+                    "    .rva {name}{LF}    .long (0x00004001 | ((((.L{name}__end - {name}) / 2) & 0x7FF) << 2))"
+                );
+            }
+        } else {
+            for (name, _, _) in arm_procs {
+                let _ = writeln!(
+                    out,
+                    "    .rva {name}{LF}    .long (0x00004001 | ((((.L{name}__end - {name}) / 2) & 0x7FF) << 2))"
+                );
+            }
+        }
+        for sym in ["__chkstk", "__wincmd_cfg_nop"] {
+            let _ = writeln!(
+                out,
+                "    .rva {sym}{LF}    .long (0x00004001 | ((((.L{sym}__end - {sym}) / 2) & 0x7FF) << 2))"
+            );
+        }
+    } else {
+        for (name, _, _) in arm_procs {
+            let _ = writeln!(
+                out,
+                "    .rva {name}{LF}    .long (0x00000001 | ((((.L{name}__end - {name}) / 4) & 0x3FFFF) << 2))"
+            );
+        }
+        for sym in ["__chkstk", "__wincmd_cfg_nop"] {
+            let _ = writeln!(
+                out,
+                "    .rva {sym}{LF}    .long (0x00000001 | ((((.L{sym}__end - {sym}) / 4) & 0x3FFFF) << 2))"
+            );
+        }
+    }
+}
+
+fn finalize_arm64_pe_sections(
+    out: &mut String,
+    module: &CanonicalModule,
+    state: &mut SectionState,
+    arm_procs: &[(String, u32, Vec<String>)],
+    target: TargetAssembler,
+) {
+    if !matches!(target, TargetAssembler::FasmArm | TargetAssembler::LlvmMc) {
+        return;
+    }
+    if !state.emitted_cfg_nop {
+        emit_standard_section(out, BinaryFormat::Arm64Pe, SectionKind::Text, target);
+        emit_arm_cfg_and_chkstk(out, BinaryFormat::Arm64Pe, target);
+        state.emitted_cfg_nop = true;
+    }
+    if !state.emitted_load_config {
+        emit_standard_section(out, BinaryFormat::Arm64Pe, SectionKind::Rdata, target);
+        emit_arm_load_config(out, module, target);
+        state.emitted_load_config = true;
+    }
+    if target == TargetAssembler::LlvmMc {
+        emit_llvm_arm_pdata(out, module, arm_procs, false);
+        return;
+    }
+    out.push_str("section '.pdata' data readable\ndata 3\n");
+    for (name, _, _) in arm_procs {
+        let _ = writeln!(
+            out,
+            "    dw rva {name}{LF}    dw (0x00000001 or (((({name}__end - {name}) / 4) and 0x3FFFF) shl 2))"
+        );
+    }
+    for sym in ["__chkstk", "__wincmd_cfg_nop"] {
+        let _ = writeln!(
+            out,
+            "    dw rva {sym}{LF}    dw (0x00000001 or (((({sym}__end - {sym}) / 4) and 0x3FFFF) shl 2))"
+        );
+    }
+    out.push_str("end data\n");
+    emit_fasmarm_pe64_idata_and_rsrc(out, module);
+}
+
+fn emit_fasmarm_pe64_idata_and_rsrc(out: &mut String, module: &CanonicalModule) {
+    const MANIFEST_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1"><application><supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}"/><supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/><supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/><supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/><supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/></application></compatibility><application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings><longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware></windowsSettings></application></assembly>"#;
+    let imps = collect_pe_imp_names(module);
+    if !imps.is_empty() {
+        out.push_str("section '.idata' import data readable writeable\n");
+        out.push_str("    dw rva wincmd_k32_ilt, 0, 0, rva wincmd_k32_name, rva wincmd_k32_iat\n");
+        out.push_str("    dw 0, 0, 0, 0, 0\nwincmd_k32_ilt:\n");
+        for api in &imps {
+            let _ = writeln!(out, "    dd rva wincmd_hn_{api}");
+        }
+        out.push_str("    dd 0\nwincmd_k32_iat:\n");
+        for api in &imps {
+            let _ = writeln!(out, "__imp_{api} dd rva wincmd_hn_{api}");
+        }
+        out.push_str("    dd 0\nwincmd_k32_name db 'KERNEL32.dll', 0\n");
+        for api in &imps {
+            let _ = writeln!(
+                out,
+                "    align 2{LF}wincmd_hn_{api}:{LF}    dh 0{LF}    db '{api}', 0"
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "section {SQUOTE}.rsrc{SQUOTE} resource data readable{LF}    dw 0, 0, 0{LF}    dh 0, 1{LF}    dw 24, 0x80000018{LF}    dw 0, 0, 0{LF}    dh 0, 1{LF}    dw 1, 0x80000030{LF}    dw 0, 0, 0{LF}    dh 0, 1{LF}    dw 0x0409, 0x00000048{LF}    dw rva __wincmd_manifest_xml, __wincmd_manifest_end - __wincmd_manifest_xml, 65001, 0{LF}__wincmd_manifest_xml:{LF}    db {SQUOTE}{MANIFEST_XML}{SQUOTE}{LF}__wincmd_manifest_end:{LF}section {SQUOTE}.reloc{SQUOTE} fixups data readable discardable"
+    );
 }
 
 fn emit_nasm_cpu(out: &mut String, cpu: Option<CpuIsa>) {
@@ -480,9 +1370,11 @@ fn emit_standard_section(
             out.push(LF);
         }
         (SectionKind::Bss, TargetAssembler::Fasm | TargetAssembler::FasmArm) => {
-            if matches!(
+            if matches!(fmt, BinaryFormat::Coff32 | BinaryFormat::Arm64Pe) {
+                out.push_str("section '.bss' readable writeable");
+            } else if matches!(
                 fmt,
-                BinaryFormat::ArmV4Pe | BinaryFormat::ArmV7Pe | BinaryFormat::Arm64Pe
+                BinaryFormat::Coff64 | BinaryFormat::ArmV4Pe | BinaryFormat::ArmV7Pe
             ) {
                 out.push_str("section '.bss' data readable writeable");
             } else {
@@ -652,10 +1544,17 @@ fn emit_global(
     }
     match target {
         TargetAssembler::Nasm => {
-            let _ = writeln!(out, "GLOBAL {symbol}");
+            if module.format == BinaryFormat::Coff64 {
+                let _ = writeln!(out, "GLOBAL {symbol}:function");
+            } else {
+                let _ = writeln!(out, "GLOBAL {symbol}");
+            }
         }
         TargetAssembler::Fasm => {
-            if module.format != BinaryFormat::Coff64 {
+            if module.format != BinaryFormat::Coff64
+                && !(module.format == BinaryFormat::Coff32
+                    && module.safeseh.as_deref() == Some(symbol))
+            {
                 let _ = writeln!(out, "public {symbol}");
             }
         }
@@ -665,9 +1564,6 @@ fn emit_global(
         }
         TargetAssembler::LlvmMc => {
             let _ = writeln!(out, ".global {symbol}");
-            if module.cpu == Some(CpuIsa::ArmV7) {
-                let _ = writeln!(out, ".thumb_func");
-            }
         }
         TargetAssembler::ArmAsm => {
             let _ = writeln!(out, "    EXPORT {symbol}");
@@ -682,14 +1578,16 @@ fn emit_extern(
     kind: &str,
     target: TargetAssembler,
 ) {
-    if fmt == BinaryFormat::Coff64 && target == TargetAssembler::Fasm {
+    if (fmt == BinaryFormat::Coff64 && target == TargetAssembler::Fasm)
+        || target == TargetAssembler::FasmArm
+    {
         return;
     }
     match target {
         TargetAssembler::Nasm => {
             let _ = writeln!(out, "EXTERN {symbol}");
         }
-        TargetAssembler::Fasm | TargetAssembler::FasmArm => {
+        TargetAssembler::Fasm => {
             let fkind = match kind {
                 "dword" => "dword",
                 "qword" => "qword",
@@ -705,10 +1603,13 @@ fn emit_extern(
             };
             let _ = writeln!(out, "EXTRN {symbol}:{jkind}");
         }
-        TargetAssembler::LlvmMc => {}
+        TargetAssembler::LlvmMc => {
+            let _ = writeln!(out, ".extern {symbol}");
+        }
         TargetAssembler::ArmAsm => {
             let _ = writeln!(out, "    IMPORT {symbol}");
         }
+        TargetAssembler::FasmArm => {}
     }
 }
 
@@ -776,7 +1677,11 @@ fn emit_struc(
                         DataWidth::Qword => "rq",
                     }
                 };
-                let _ = writeln!(out, "    {name}.{} {r_kw} {}", f.name, f.count);
+                if target == TargetAssembler::FasmArm {
+                    let _ = writeln!(out, "    {name}.{} = ${LF}    {r_kw} {}", f.name, f.count);
+                } else {
+                    let _ = writeln!(out, "    {name}.{} {r_kw} {}", f.name, f.count);
+                }
             }
             let _ = writeln!(out, "    {name}_SIZE = $");
             let _ = writeln!(out, "    assert {name}_SIZE = {expected_size}");
@@ -827,8 +1732,15 @@ fn emit_proc(out: &mut String, req: &ProcEmitReq<'_>) -> Result<(), ToolError> {
         )?;
     }
     match (req.kind, req.target) {
-        (ProcKind::Win64Frame { .. }, TargetAssembler::Nasm | TargetAssembler::Fasm) => {
+        (ProcKind::Win64Frame { .. }, TargetAssembler::Nasm | TargetAssembler::Fasm)
+        | (_, TargetAssembler::FasmArm) => {
             let _ = writeln!(out, "{}__end:", req.name);
+        }
+        (_, TargetAssembler::LlvmMc) => {
+            let _ = writeln!(out, ".L{}__end:", req.name);
+            if req.module.cpu == Some(CpuIsa::ArmV4) {
+                let _ = writeln!(out, ".ifndef __WINCMD_THUMB2{LF}    .ltorg{LF}.endif");
+            }
         }
         (_, TargetAssembler::Jwasm | TargetAssembler::ArmAsm) => {
             let _ = writeln!(out, "{} ENDP", req.name);
@@ -872,6 +1784,8 @@ fn emit_proc_prologue(out: &mut String, req: &ProcEmitReq<'_>) -> Result<(), Too
             if module.cpu == Some(CpuIsa::ArmV7) {
                 out.push_str(".thumb_func");
                 out.push(LF);
+            } else if module.cpu == Some(CpuIsa::ArmV4) {
+                let _ = writeln!(out, ".ifdef __WINCMD_THUMB2{LF}.thumb_func{LF}.endif");
             }
             let _ = writeln!(out, "{name}:");
         }
@@ -883,41 +1797,66 @@ fn emit_proc_prologue(out: &mut String, req: &ProcEmitReq<'_>) -> Result<(), Too
                 stack_alloc,
                 saved_regs,
             },
-            TargetAssembler::Nasm | TargetAssembler::Fasm,
-        ) => {
+            _,
+        ) => emit_win64_frame_prologue(out, req, *stack_alloc, saved_regs)?,
+    }
+    Ok(())
+}
+
+fn emit_win64_frame_prologue(
+    out: &mut String,
+    req: &ProcEmitReq<'_>,
+    stack_alloc: u32,
+    saved_regs: &[String],
+) -> Result<(), ToolError> {
+    let name = req.name;
+    let is_glob = collect_coff64_gfids(req.module).contains(&name);
+    match req.target {
+        TargetAssembler::Nasm | TargetAssembler::Fasm => {
             let _ = writeln!(out, "{name}:");
+            if is_glob {
+                let _ = writeln!(out, "    db 0xF3, 0x0F, 0x1E, 0xFA");
+            }
             for (idx, reg) in saved_regs.iter().enumerate() {
                 let _ = writeln!(out, "    push {reg}");
                 let _ = writeln!(out, "{name}__push_{idx}:");
             }
-            if *stack_alloc > 0 {
+            if stack_alloc >= 4096 {
+                let _ = writeln!(
+                    out,
+                    "    mov eax, {stack_alloc}{LF}    call __chkstk{LF}    sub rsp, rax"
+                );
+            } else if stack_alloc > 0 {
                 let _ = writeln!(out, "    sub rsp, {stack_alloc}");
             }
             let _ = writeln!(out, "{name}__prolog_end:");
         }
-        (
-            ProcKind::Win64Frame {
-                stack_alloc,
-                saved_regs,
-            },
-            TargetAssembler::Jwasm,
-        ) => {
+        TargetAssembler::Jwasm => {
             let _ = writeln!(out, "{name} PROC FRAME");
+            if is_glob {
+                let _ = writeln!(out, "    DB 0F3h, 0Fh, 1Eh, 0FAh");
+            }
             for reg in saved_regs {
                 let _ = writeln!(out, "    push {reg}");
                 let _ = writeln!(out, "    .PUSHREG {reg}");
             }
-            if *stack_alloc > 0 {
+            if stack_alloc >= 4096 {
+                let _ = writeln!(
+                    out,
+                    "    mov eax, {stack_alloc}{LF}    call __chkstk{LF}    sub rsp, rax"
+                );
+                let _ = writeln!(out, "    .ALLOCSTACK {stack_alloc}");
+            } else if stack_alloc > 0 {
                 let _ = writeln!(out, "    sub rsp, {stack_alloc}");
                 let _ = writeln!(out, "    .ALLOCSTACK {stack_alloc}");
             }
             out.push_str("    .ENDPROLOG");
             out.push(LF);
         }
-        (ProcKind::Win64Frame { .. }, _) => {
+        TargetAssembler::FasmArm | TargetAssembler::LlvmMc | TargetAssembler::ArmAsm => {
             return Err(ToolError::Lowering {
                 span: req.span.clone(),
-                assembler: target,
+                assembler: req.target,
                 message: "@proc_frame is only valid for x86-64 assemblers".into(),
             });
         }
@@ -997,7 +1936,7 @@ fn emit_stmt(
                 });
             };
             if *stack_alloc > 0 {
-                let _ = writeln!(out, "    add rsp, {stack_alloc}");
+                let _ = writeln!(out, "    lea rsp, [rsp + {stack_alloc}]");
             }
             for reg in saved_regs.iter().rev() {
                 let _ = writeln!(out, "    pop {reg}");
@@ -1149,7 +2088,7 @@ fn emit_reserve(
             }
         }
         TargetAssembler::Fasm | TargetAssembler::FasmArm => {
-            if in_flat_bin || matches!(fmt, BinaryFormat::ArmV7Pe | BinaryFormat::Arm64Pe) {
+            if in_flat_bin && target == TargetAssembler::Fasm {
                 let elem_bytes = width.byte_size();
                 let _ = writeln!(out, "{label}:");
                 let _ = writeln!(out, "repeat (({cnt}) * {elem_bytes})");
@@ -1208,10 +2147,20 @@ fn emit_align_zero(
         TargetAssembler::Nasm => {
             let _ = writeln!(out, "align {align_bytes}, db 0");
         }
-        TargetAssembler::Fasm | TargetAssembler::FasmArm => {
+        TargetAssembler::Fasm => {
             let _ = writeln!(
                 out,
                 "repeat (({align_bytes} - (($ - {active_seg_base}) and {mask})) and {mask})"
+            );
+            out.push_str("    db 0");
+            out.push(LF);
+            out.push_str("end repeat");
+            out.push(LF);
+        }
+        TargetAssembler::FasmArm => {
+            let _ = writeln!(
+                out,
+                "repeat (({align_bytes} - ($ and {mask})) and {mask})"
             );
             out.push_str("    db 0");
             out.push(LF);
@@ -1253,6 +2202,23 @@ fn emit_instruction(
         return;
     }
 
+    if mnem.eq_ignore_ascii_case("endbr64") && operands.is_empty() {
+        if target == TargetAssembler::Jwasm {
+            let _ = writeln!(out, "    DB 0F3h, 0Fh, 1Eh, 0FAh");
+        } else {
+            let _ = writeln!(out, "    db 0xF3, 0x0F, 0x1E, 0xFA");
+        }
+        return;
+    }
+
+    if matches!(
+        module.cpu,
+        Some(CpuIsa::ArmV4 | CpuIsa::ArmV7 | CpuIsa::Arm64)
+    ) && try_emit_arm_pseudo(out, module.cpu, proc_name, &mnem, operands, target)
+    {
+        return;
+    }
+
     if operands.is_empty() {
         let _ = writeln!(out, "    {mnem}");
         return;
@@ -1262,7 +2228,265 @@ fn emit_instruction(
         .iter()
         .map(|op| lower_operand(op, module.cpu, proc_name, target))
         .collect();
+    if matches!(module.cpu, Some(CpuIsa::X86_8086 | CpuIsa::X86_286))
+        && matches!(target, TargetAssembler::Nasm | TargetAssembler::Fasm)
+        && lowered_ops.len() == 1
+        && is_x86_cond_jump(&mnem)
+        && !lowered_ops[0].starts_with("short ")
+    {
+        let _ = writeln!(out, "    {mnem} short {}", lowered_ops[0]);
+        return;
+    }
     let _ = writeln!(out, "    {mnem} {}", lowered_ops.join(", "));
+}
+
+fn try_emit_arm_pseudo(
+    out: &mut String,
+    cpu: Option<CpuIsa>,
+    proc_name: Option<&str>,
+    mnem: &str,
+    operands: &[String],
+    target: TargetAssembler,
+) -> bool {
+    let m = mnem.to_ascii_lowercase();
+    if m == "adr_sym" && operands.len() == 2 {
+        let rd = operands[0].trim();
+        let sym = rewrite_expr_tokens(operands[1].trim(), proc_name, target);
+        emit_arm_adr_sym(out, cpu, rd, &sym, target);
+        return true;
+    }
+    if m == "mov_imm32" && operands.len() == 2 {
+        let rd = operands[0].trim();
+        let raw_imm = operands[1].trim().trim_start_matches('#').trim();
+        emit_arm_mov_imm32(out, cpu, rd, raw_imm, proc_name, target);
+        return true;
+    }
+    if m == "call_iat" && operands.len() == 1 {
+        let sym = rewrite_expr_tokens(operands[0].trim(), proc_name, target);
+        emit_arm_call_iat(out, cpu, &sym, target);
+        return true;
+    }
+    false
+}
+
+fn emit_arm_adr_sym(
+    out: &mut String,
+    cpu: Option<CpuIsa>,
+    rd: &str,
+    sym: &str,
+    target: TargetAssembler,
+) {
+    match (cpu, target) {
+        (Some(CpuIsa::ArmV4), TargetAssembler::FasmArm) => {
+            let _ = writeln!(
+                out,
+                "if defined __WINCMD_THUMB2{LF}    movw {rd}, ({sym}) and 0xFFFF{LF}    movt {rd}, (({sym}) shr 16) and 0xFFFF{LF}else{LF}    mov {rd}, ({sym}) and 0xFF{LF}    orr {rd}, {rd}, ({sym}) and 0xFF00{LF}    orr {rd}, {rd}, ({sym}) and 0xFF0000{LF}    orr {rd}, {rd}, ({sym}) and 0xFF000000{LF}end if"
+            );
+        }
+        (Some(CpuIsa::ArmV4), TargetAssembler::LlvmMc) => {
+            let _ = writeln!(
+                out,
+                ".ifdef __WINCMD_THUMB2{LF}    movw {rd}, :lower16:{sym}{LF}    movt {rd}, :upper16:{sym}{LF}.else{LF}    ldr {rd}, ={sym}{LF}.endif"
+            );
+        }
+        (Some(CpuIsa::ArmV4), _) => {
+            let _ = writeln!(out, "    ldr {rd}, ={sym}");
+        }
+        (Some(CpuIsa::ArmV7), TargetAssembler::FasmArm) => {
+            let _ = writeln!(
+                out,
+                "    movw {rd}, ({sym}) and 0xFFFF{LF}    movt {rd}, (({sym}) shr 16) and 0xFFFF"
+            );
+        }
+        (Some(CpuIsa::ArmV7), TargetAssembler::LlvmMc) => {
+            let _ = writeln!(
+                out,
+                "    movw {rd}, :lower16:{sym}{LF}    movt {rd}, :upper16:{sym}"
+            );
+        }
+        (Some(CpuIsa::ArmV7), _) => {
+            let _ = writeln!(out, "    movw {rd}, {sym}{LF}    movt {rd}, {sym}");
+        }
+        (Some(CpuIsa::Arm64), TargetAssembler::FasmArm) => {
+            let _ = writeln!(
+                out,
+                "    adrp {rd}, {sym}{LF}    add {rd}, {rd}, ({sym}) and 0xFFF"
+            );
+        }
+        (Some(CpuIsa::Arm64), TargetAssembler::LlvmMc) => {
+            let _ = writeln!(out, "    adrp {rd}, {sym}{LF}    add {rd}, {rd}, :lo12:{sym}");
+        }
+        _ => {
+            let _ = writeln!(out, "    adrp {rd}, {sym}{LF}    add {rd}, {rd}, {sym}");
+        }
+    }
+}
+
+fn parse_u32_imm(s: &str) -> Option<u32> {
+    s.strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .map_or_else(
+            || s.parse::<u32>().ok(),
+            |hex| u32::from_str_radix(hex, 16).ok(),
+        )
+}
+
+fn emit_arm_mov_imm32(
+    out: &mut String,
+    cpu: Option<CpuIsa>,
+    rd: &str,
+    raw_imm: &str,
+    proc_name: Option<&str>,
+    target: TargetAssembler,
+) {
+    let pfx = if target == TargetAssembler::FasmArm {
+        ""
+    } else {
+        "#"
+    };
+    if let Some(val) = parse_u32_imm(raw_imm) {
+        match cpu {
+            Some(CpuIsa::ArmV4) => {
+                let b0 = val & 0xFF;
+                let _ = writeln!(out, "    mov {rd}, {pfx}0x{b0:02X}");
+                for shift in [8_u32, 16, 24] {
+                    let part = val & (0xFF << shift);
+                    if part != 0 {
+                        let _ = writeln!(out, "    orr {rd}, {rd}, {pfx}0x{part:08X}");
+                    }
+                }
+            }
+            Some(CpuIsa::ArmV7) => {
+                let lo = val & 0xFFFF;
+                let hi = (val >> 16) & 0xFFFF;
+                let _ = writeln!(out, "    movw {rd}, {pfx}0x{lo:04X}");
+                if hi != 0 {
+                    let _ = writeln!(out, "    movt {rd}, {pfx}0x{hi:04X}");
+                }
+            }
+            _ => {
+                let lo = val & 0xFFFF;
+                let hi = (val >> 16) & 0xFFFF;
+                let _ = writeln!(out, "    movz {rd}, {pfx}0x{lo:04X}");
+                if hi != 0 {
+                    let _ = writeln!(out, "    movk {rd}, {pfx}0x{hi:04X}, lsl {pfx}16");
+                }
+            }
+        }
+        return;
+    }
+    let expr = rewrite_expr_tokens(raw_imm, proc_name, target);
+    match cpu {
+        Some(CpuIsa::ArmV4) => {
+            let (and_op, _) = if target == TargetAssembler::FasmArm {
+                ("and", "")
+            } else {
+                ("&", "#")
+            };
+            let _ = writeln!(
+                out,
+                "    mov {rd}, {pfx}(({expr}) {and_op} 0xFF){LF}    orr {rd}, {rd}, {pfx}(({expr}) {and_op} 0xFF00){LF}    orr {rd}, {rd}, {pfx}(({expr}) {and_op} 0xFF0000){LF}    orr {rd}, {rd}, {pfx}(({expr}) {and_op} 0xFF000000)"
+            );
+        }
+        Some(CpuIsa::ArmV7) => {
+            let (and_op, shr_op) = if target == TargetAssembler::FasmArm {
+                ("and", "shr")
+            } else {
+                ("&", ">>")
+            };
+            let _ = writeln!(
+                out,
+                "    movw {rd}, {pfx}(({expr}) {and_op} 0xFFFF){LF}    movt {rd}, {pfx}((({expr}) {shr_op} 16) {and_op} 0xFFFF)"
+            );
+        }
+        _ => {
+            let (and_op, shr_op) = if target == TargetAssembler::FasmArm {
+                ("and", "shr")
+            } else {
+                ("&", ">>")
+            };
+            let _ = writeln!(
+                out,
+                "    movz {rd}, {pfx}(({expr}) {and_op} 0xFFFF){LF}    movk {rd}, {pfx}((({expr}) {shr_op} 16) {and_op} 0xFFFF), lsl {pfx}16"
+            );
+        }
+    }
+}
+
+fn emit_arm_call_iat(out: &mut String, cpu: Option<CpuIsa>, sym: &str, target: TargetAssembler) {
+    match cpu {
+        Some(CpuIsa::ArmV4) => {
+            emit_arm_adr_sym(out, cpu, "r12", sym, target);
+            let _ = writeln!(
+                out,
+                "    ldr r12, [r12]{LF}    mov lr, pc{LF}    bx r12"
+            );
+        }
+        Some(CpuIsa::ArmV7) => {
+            emit_arm_adr_sym(out, cpu, "r12", sym, target);
+            let _ = writeln!(out, "    ldr r12, [r12]{LF}    blx r12");
+        }
+        _ => match target {
+            TargetAssembler::FasmArm => {
+                let _ = writeln!(
+                    out,
+                    "    adrp x16, {sym}{LF}    ldr x16, [x16, ({sym}) and 0xFFF]{LF}    blr x16"
+                );
+            }
+            TargetAssembler::LlvmMc => {
+                let _ = writeln!(
+                    out,
+                    "    adrp x16, {sym}{LF}    ldr x16, [x16, :lo12:{sym}]{LF}    blr x16"
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    out,
+                    "    adrp x16, {sym}{LF}    ldr x16, [x16, {sym}]{LF}    blr x16"
+                );
+            }
+        },
+    }
+}
+
+fn is_x86_cond_jump(mnem: &str) -> bool {
+    matches!(
+        mnem.to_ascii_lowercase().as_str(),
+        "jo" | "jno"
+            | "jb"
+            | "jnb"
+            | "jae"
+            | "jc"
+            | "jnc"
+            | "je"
+            | "jz"
+            | "jne"
+            | "jnz"
+            | "jbe"
+            | "jna"
+            | "ja"
+            | "jnbe"
+            | "js"
+            | "jns"
+            | "jp"
+            | "jpe"
+            | "jnp"
+            | "jpo"
+            | "jl"
+            | "jnge"
+            | "jge"
+            | "jnl"
+            | "jle"
+            | "jng"
+            | "jg"
+            | "jnle"
+            | "jcxz"
+            | "loop"
+            | "loope"
+            | "loopz"
+            | "loopne"
+            | "loopnz"
+    )
 }
 
 fn has_16bit_addr_reg(expr: &str) -> bool {
@@ -1451,6 +2675,10 @@ pub fn rewrite_expr_tokens(
                     }
                 }
                 i = j;
+                continue;
+            } else if matches!(target, TargetAssembler::LlvmMc | TargetAssembler::ArmAsm) {
+                out.push('_');
+                i += 1;
                 continue;
             }
         }

@@ -258,8 +258,8 @@ fn m2_dos400_fat16_64bit_chcp_dbcs_msg_ems40_and_xms_swap() -> Result<(), ToolEr
         assert!(out.contains(&expected_tn), "stdout: {out}");
         assert!(out.contains("File not found"), "stdout: {out}");
 
-        let trn_seg = 0xA000 - 0x0680;
-        let lead_81_byte = vm.read_u8(trn_seg, 0x4C10 + (0x81 / 8));
+        let trn_seg = 0xA000 - 0x0A20;
+        let lead_81_byte = vm.read_u8(trn_seg, 0x8010 + (0x81 / 8));
         assert_ne!(lead_81_byte & (1 << (0x81 & 7)), 0);
 
         // 2. XMS 2.0 swap test (no EMS, no WINCMD.COM on disk — ONLY XMS can reload TRANSIENT!)

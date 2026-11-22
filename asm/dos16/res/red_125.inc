@@ -13,6 +13,14 @@
 ;; @desc Bit 1 of bRedirFlags: character stdout redirected to fcbRedirOut.
 @const REDIR125_OUT_ACTIVE = 0x02
 
+;; @const REDIR125_NUL_IN
+;; @desc Bit 2 of bRedirFlags: character stdin redirected to NUL (immediate EOF).
+@const REDIR125_NUL_IN = 0x04
+
+;; @const REDIR125_NUL_OUT
+;; @desc Bit 3 of bRedirFlags: character stdout redirected to NUL (bit-bucket discard).
+@const REDIR125_NUL_OUT = 0x08
+
 ;; @const REDIR125_BUSY
 ;; @desc Bit 7 of bRedirFlags: re-entrancy guard while performing underlying FCB I/O.
 @const REDIR125_BUSY = 0x80
@@ -91,6 +99,8 @@
 @proc red125_get_char
     push cx
     push dx
+    test byte [cs:bRedirFlags], REDIR125_NUL_IN
+    jnz .eof
     mov dx, addr(fcbRedirIn)
     mov ah, DOS_FCB_RAND_READ
     call red125_fcb_byte_io
@@ -118,6 +128,8 @@
 ;; @clobbers ax
 ;; @desc Writes one byte to fcbRedirOut while preserving caller DTA on MS-DOS 1.25.
 @proc red125_put_char
+    test byte [cs:bRedirFlags], REDIR125_NUL_OUT
+    jnz .nul_done
     push cx
     push dx
     mov byte [cs:bRedirIoByte], dl
@@ -126,6 +138,7 @@
     call red125_fcb_byte_io
     pop dx
     pop cx
+.nul_done:
     ret
 @endproc
 
@@ -147,7 +160,7 @@
     jmp .chain
 
 .chk_redir:
-    test byte [cs:bRedirFlags], REDIR125_IN_ACTIVE
+    test byte [cs:bRedirFlags], (REDIR125_IN_ACTIVE + REDIR125_NUL_IN)
     jz .chk_out
 
     cmp ah, DOS_CON_IN_ECHO
@@ -166,7 +179,7 @@
     je .in_raw06
 
 .chk_out:
-    test byte [cs:bRedirFlags], REDIR125_OUT_ACTIVE
+    test byte [cs:bRedirFlags], (REDIR125_OUT_ACTIVE + REDIR125_NUL_OUT)
     jz .chain
 
     cmp ah, DOS_CON_OUT

@@ -148,9 +148,13 @@ module WinCmdDosQemuCI
 
     dos_dir = File.join(build_dir, toolchain, "dos16")
     wincmd = File.join(dos_dir, "WINCMD.COM")
+    wincmd1 = File.join(dos_dir, "WINCMD1.COM")
     winmsg = File.join(dos_dir, "WINCMD.MSG")
     asmconv = File.join(dos_dir, "ASMCONV.COM")
-    [wincmd, winmsg, asmconv].each do |bin|
+    mem_com = File.join(dos_dir, "MEM.COM")
+    hostname_com = File.join(dos_dir, "HOSTNAME.COM")
+    whoami_com = File.join(dos_dir, "WHOAMI.COM")
+    [wincmd, wincmd1, winmsg, asmconv, mem_com, hostname_com, whoami_com].each do |bin|
       raise "Missing built DOS16 artifact: #{bin}" unless File.file?(bin)
     end
 
@@ -193,17 +197,29 @@ module WinCmdDosQemuCI
       comm = build_communicator(flavor, ver, host, port, 120)
       raise "Timed out waiting for #{os_target} serial prompt" unless comm.wait_for_ready(120)
 
-      drive_prefix = os_target == "msdos-1.25" ? "A:#{BS}" : "C:#{BS}"
-      comm.fast_upload_file!(wincmd, "#{drive_prefix}WINCMD.COM")
-      comm.fast_upload_file!(winmsg, "#{drive_prefix}WINCMD.MSG")
-      comm.fast_upload_file!(asmconv, "#{drive_prefix}ASMCONV.COM")
+      upload_prefix = os_target == "msdos-1.25" ? "A:" : "C:#{BS}"
+      cmd_prefix = %w[msdos-1.25 msdos-2.0].include?(os_target) ? "" : "C:#{BS}"
+      comm.fast_upload_file!(wincmd, "#{upload_prefix}WINCMD.COM")
+      comm.fast_upload_file!(wincmd1, "#{upload_prefix}WINCMD1.COM")
+      comm.fast_upload_file!(winmsg, "#{upload_prefix}WINCMD.MSG")
+      comm.fast_upload_file!(asmconv, "#{upload_prefix}ASMCONV.COM")
+      comm.fast_upload_file!(mem_com, "#{upload_prefix}MEM.COM")
+      comm.fast_upload_file!(hostname_com, "#{upload_prefix}HOSTNAME.COM")
+      comm.fast_upload_file!(whoami_com, "#{upload_prefix}WHOAMI.COM")
 
       checks = [
-        ["#{drive_prefix}WINCMD.COM /C VER", "WINCMD"],
-        ["#{drive_prefix}WINCMD.COM /C ECHO QEMU_OK_#{os_target.upcase}", "QEMU_OK_"],
-        ["#{drive_prefix}WINCMD.COM /C SET /A X=6*7", nil]
+        ["#{cmd_prefix}WINCMD.COM /C VER", "WINCMD"],
+        ["#{cmd_prefix}WINCMD1.COM /C VER", "WINCMD1"],
+        ["#{cmd_prefix}WINCMD.COM /C ECHO QEMU_OK_#{os_target.upcase}", "QEMU_OK_"],
+        ["#{cmd_prefix}WINCMD.COM /C SET /A X=6*7", "42"],
+        ["#{cmd_prefix}WINCMD.COM /C IF EXIST NUL ECHO NUL_QEMU_OK", "NUL_QEMU_OK"],
+        ["#{cmd_prefix}WINCMD.COM /C BREAK", "BREAK IS"],
+        ["#{cmd_prefix}WINCMD.COM /C DATE /T", "-"],
+        ["#{cmd_prefix}MEM.COM", "CONVENTIONAL"],
+        ["#{cmd_prefix}HOSTNAME.COM", "DOSPC"],
+        ["#{cmd_prefix}WHOAMI.COM /USER", "S-1-5-21"]
       ]
-      checks << ["#{drive_prefix}ASMCONV.COM /?", "ASMCONV"] unless os_target == "msdos-1.25"
+      checks << ["#{cmd_prefix}ASMCONV.COM /?", "ASMCONV"] unless os_target == "msdos-1.25"
 
       checks.each do |cmd, expected|
         out = +""

@@ -335,29 +335,61 @@
 ;; @clobbers ax, bx, cx, dx, si
 ;; @desc Counts unquoted, unescaped '(' and ')' outside REM/:: comments for multiline blocks.
 @proc lex_count_paren_delta
+.eat_lead_at:
     call lex_skip_hspace
+    cmp al, '@'
+    jne .chk_colon_rem
+    inc si
+    jmp .eat_lead_at
+.chk_colon_rem:
     cmp al, ':'
-    je .done
+    jne .chk_rem_kw
+    ret
+.chk_rem_kw:
     ; Check leading REM comment
     mov ah, al
     and ah, 0xDF
     cmp ah, 'R'
-    jne .scan
+    jne .chk_echo_lp
     mov ah, byte [si + 1]
     and ah, 0xDF
     cmp ah, 'E'
-    jne .scan
+    jne .chk_echo_lp
     mov ah, byte [si + 2]
     and ah, 0xDF
     cmp ah, 'M'
-    jne .scan
+    jne .chk_echo_lp
     mov ah, byte [si + 3]
     cmp ah, 0
-    je .done
+    je .ret_early
     cmp ah, 0x20
-    je .done
+    je .ret_early
     cmp ah, 0x09
-    je .done
+    jne .chk_echo_lp
+.ret_early:
+    ret
+
+.chk_echo_lp:
+    ; 'ECHO(' uses '(' as ECHO's delimiter, NOT an open compound block!
+    mov ah, al
+    and ah, 0xDF
+    cmp ah, 'E'
+    jne .scan
+    mov ah, byte [si + 1]
+    and ah, 0xDF
+    cmp ah, 'C'
+    jne .scan
+    mov ah, byte [si + 2]
+    and ah, 0xDF
+    cmp ah, 'H'
+    jne .scan
+    mov ah, byte [si + 3]
+    and ah, 0xDF
+    cmp ah, 'O'
+    jne .scan
+    cmp byte [si + 4], '('
+    jne .scan
+    add si, 5
 
 .scan:
     xor dl, dl ; quote toggle

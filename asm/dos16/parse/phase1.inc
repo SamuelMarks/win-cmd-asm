@@ -178,10 +178,12 @@
 @proc phase1_expand
     push bp
     mov bp, sp
-    sub sp, 10
-    ; [bp-2]=out_buf, [bp-4]=out_len, [bp-6]=work_buf (256B), [bp-8]=xform_buf (256B), [bp-10]=in_batch
+    sub sp, 12
+    ; [bp-2]=out_buf, [bp-4]=out_len, [bp-6]=work_buf (256B), [bp-8]=xform_buf (256B), [bp-10]=in_batch, [bp-12]=arena_mark
     mov word [bp - 2], di
     mov word [bp - 4], 0
+    mov ax, word [wArenaPtr]
+    mov word [bp - 12], ax
 
     push si
     mov cx, 520
@@ -191,7 +193,7 @@
     mov di, word [bp - 2]
     mov byte [di], 0
     xor cx, cx
-    add sp, 10
+    add sp, 12
     pop bp
     ret
 .p1_mem_ok:
@@ -444,11 +446,13 @@
     jmp .p1_lp
 
 .p1_done:
+    mov ax, word [bp - 12]
+    mov word [wArenaPtr], ax
     mov di, word [bp - 2]
     mov bx, word [bp - 4]
     mov byte [di + bx], 0
     mov cx, bx
-    add sp, 10
+    add sp, 12
     pop bp
     ret
 @endproc

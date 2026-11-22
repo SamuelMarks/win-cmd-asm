@@ -48,6 +48,13 @@ pub fn generate_cmd_tail(rng: &mut SplitMix64) -> String {
         " /C ECHO.",
         " /C SET FOO=BAR",
         " /C SET /A 12+34*2",
+        " --dialect=nt /C FUZZ.BAT",
+        " --dialect=nt /C IF EXIST NUL ECHO NUL_OK",
+        " --dialect=nt /C COLOR 1E",
+        " /C BREAK",
+        " /C VERIFY",
+        " /C DATE /T",
+        " /C TIME /T",
         " /C REM COMMENT LINE",
         " /C IF 1==1 ECHO MATCH",
         " /C IF NOT 1==2 ECHO DIFF",
@@ -56,14 +63,39 @@ pub fn generate_cmd_tail(rng: &mut SplitMix64) -> String {
     ];
     let base = TEMPLATES[rng.gen_range(TEMPLATES.len())];
     if base == " /C SET /A 12+34*2" {
-        let a = i32::try_from(rng.next_u64() % 200).unwrap_or(0) - 100;
+        let a = i32::try_from(rng.next_u64() % 400).unwrap_or(0) - 200;
         let b = i32::try_from(rng.next_u64() % 50).unwrap_or(0) + 1;
-        let ops = ["+", "-", "*", "/"];
+        let ops = ["+", "-", "*", "/", "%", "&", "^", "|"];
         let op = ops[rng.gen_range(ops.len())];
         format!(" /C SET /A ({a}){op}({b})")
     } else {
         base.to_owned()
     }
+}
+
+fn generate_fuzz_bat(rng: &mut SplitMix64, era: DosEra) -> Vec<u8> {
+    let v1 = i32::try_from(rng.next_u64() % 100).unwrap_or(0);
+    let v2 = i32::try_from(rng.next_u64() % 20).unwrap_or(0) + 1;
+    let sh = rng.gen_range(8);
+    let mut lines = vec![
+        String::from("@ECHO OFF"),
+        format!("SET /A X=({v1}+{v2})*3, Y=X>>{sh}"),
+        String::from("ECHO V=%X%_%Y%"),
+        String::from("ECHO DROP > NUL"),
+    ];
+    if era != DosEra::Dos125 {
+        lines.push(String::from("SETLOCAL EnableDelayedExpansion"));
+        lines.push(String::from("SET /A Y+=5"));
+        lines.push(String::from("ECHO IN=!Y!"));
+        lines.push(String::from("ENDLOCAL"));
+        lines.push(String::from("ECHO OUT=%Y%"));
+    }
+    let mut raw = Vec::new();
+    for ln in lines {
+        raw.extend_from_slice(ln.as_bytes());
+        raw.extend_from_slice(&[0x0D, 0x0A]);
+    }
+    raw
 }
 
 /// Runs `iterations` generated command-line inputs identically across multiple `.COM` builds
@@ -87,12 +119,14 @@ pub fn run_differential_com_fuzz(
     let mut rng = SplitMix64::new(seed);
     for case_index in 0..iterations {
         let tail = generate_cmd_tail(&mut rng);
+        let bat_body = generate_fuzz_bat(&mut rng, era);
         let mut baseline: Option<(&str, VmRunResult)> = None;
 
         for &(label, img) in binaries {
             let mut vm = DosVm::new(era);
+            vm.vfs.insert(String::from("FUZZ.BAT"), bat_body.clone());
             vm.load_com(img, &tail, &[("COMSPEC", r"A:\WINCMD.COM"), ("PATH", "A:")])?;
-            let res = vm.run(500_000)?;
+            let res = vm.run(3_000_000)?;
             if let Some((base_lbl, ref base_res)) = baseline {
                 if res.exit_code != base_res.exit_code
                     || res.stdout != base_res.stdout

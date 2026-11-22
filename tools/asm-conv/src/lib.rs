@@ -5,7 +5,8 @@ pub mod ast;
 pub mod lower;
 pub mod parser;
 
-use crate::ast::CanonicalModule;
+use crate::ast::{BinaryFormat, CanonicalModule, ProcKind, TopItem};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -67,19 +68,47 @@ pub fn convert_tree(in_dir: &Path, out_dir: &Path) -> Result<usize, ToolError> {
     collect_canonical_files(in_dir, in_dir, &mut files)?;
     files.sort();
 
-    let mut generated = 0_usize;
+    let mut parsed_map: BTreeMap<String, CanonicalModule> = BTreeMap::new();
+    let mut ordered_rels: Vec<(PathBuf, String)> = Vec::new();
+
     for full_path in files {
         let rel = full_path
             .strip_prefix(in_dir)
             .map_err(|_| ToolError::CliUsage {
                 message: format!("failed to strip prefix `{}`", in_dir.display()),
-            })?;
-        let display_rel = rel.to_string_lossy().replace(92 as char, "/");
+            })?
+            .to_path_buf();
+        let display_rel = normalize_slash_path(&rel);
         let content = fs::read_to_string(&full_path)?;
         let module = parser::parse_canonical(&display_rel, &content)?;
+        parsed_map.insert(display_rel.clone(), module);
+        ordered_rels.push((rel, display_rel));
+    }
 
-        for &target in applicable_targets(&module) {
-            let lowered = lower::lower_module(&module, target)?;
+    let mut generated = 0_usize;
+    for (rel, key) in &ordered_rels {
+        let Some(module) = parsed_map.get(key) else {
+            continue;
+        };
+        let ordered_frames = if module.format == BinaryFormat::Coff64 {
+            let mut frames = Vec::new();
+            let mut visited = BTreeSet::new();
+            collect_win64_frames_ordered(key, module, &parsed_map, &mut visited, &mut frames);
+            Some(frames)
+        } else if matches!(
+            module.format,
+            BinaryFormat::ArmV4Pe | BinaryFormat::ArmV7Pe | BinaryFormat::Arm64Pe
+        ) {
+            let mut procs = Vec::new();
+            let mut visited = BTreeSet::new();
+            collect_arm_procs_ordered(key, module, &parsed_map, &mut visited, &mut procs);
+            Some(procs)
+        } else {
+            None
+        };
+
+        for &target in applicable_targets(module) {
+            let lowered = lower::lower_module_with_frames(module, ordered_frames.as_deref(), target)?;
             let dst = out_dir.join(target.slug()).join(rel);
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent)?;
@@ -90,6 +119,86 @@ pub fn convert_tree(in_dir: &Path, out_dir: &Path) -> Result<usize, ToolError> {
     }
 
     Ok(generated)
+}
+
+fn normalize_slash_path(p: &Path) -> String {
+    let raw = p.to_string_lossy().replace(char::from(92_u8), "/");
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in raw.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            let _ = parts.pop();
+        } else {
+            parts.push(seg);
+        }
+    }
+    parts.join("/")
+}
+
+fn collect_win64_frames_ordered(
+    cur_key: &str,
+    module: &CanonicalModule,
+    parsed_map: &BTreeMap<String, CanonicalModule>,
+    visited: &mut BTreeSet<String>,
+    out: &mut Vec<(String, u32, Vec<String>)>,
+) {
+    if !visited.insert(cur_key.to_owned()) {
+        return;
+    }
+    let parent_dir = Path::new(cur_key).parent().unwrap_or_else(|| Path::new(""));
+    for item in &module.items {
+        match item {
+            TopItem::Include { path, .. } => {
+                let joined = parent_dir.join(path);
+                let inc_key = normalize_slash_path(&joined);
+                if let Some(inc_mod) = parsed_map.get(&inc_key) {
+                    collect_win64_frames_ordered(&inc_key, inc_mod, parsed_map, visited, out);
+                }
+            }
+            TopItem::Proc {
+                name,
+                kind:
+                    ProcKind::Win64Frame {
+                        stack_alloc,
+                        saved_regs,
+                    },
+                ..
+            } => {
+                out.push((name.clone(), *stack_alloc, saved_regs.clone()));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_arm_procs_ordered(
+    cur_key: &str,
+    module: &CanonicalModule,
+    parsed_map: &BTreeMap<String, CanonicalModule>,
+    visited: &mut BTreeSet<String>,
+    out: &mut Vec<(String, u32, Vec<String>)>,
+) {
+    if !visited.insert(cur_key.to_owned()) {
+        return;
+    }
+    let parent_dir = Path::new(cur_key).parent().unwrap_or_else(|| Path::new(""));
+    for item in &module.items {
+        match item {
+            TopItem::Include { path, .. } => {
+                let joined = parent_dir.join(path);
+                let inc_key = normalize_slash_path(&joined);
+                if let Some(inc_mod) = parsed_map.get(&inc_key) {
+                    collect_arm_procs_ordered(&inc_key, inc_mod, parsed_map, visited, out);
+                }
+            }
+            TopItem::Proc { name, .. } => {
+                out.push((name.clone(), 0, Vec::new()));
+            }
+            _ => {}
+        }
+    }
 }
 
 fn collect_canonical_files(
@@ -362,12 +471,19 @@ s:
         let coff32 = ";; @file c.asm
 @cpu 386
 @format coff32
+@safeseh _seh
+@global _seh
 @global f
 @extern imp, dword
 @section text
+@proc _seh
+ mov eax, 1
+ ret
+@endproc
 @proc f
  mov eax, dword [esp + 4]
  mov al, byte [ds:ebx]
+ mov eax, dword [fs:0]
  ret
 @endproc
 ";
@@ -453,6 +569,7 @@ glbl:
             "@cpu unknown_isa",
             "@format bogus_fmt",
             "@entry",
+            "@safeseh",
             "@include unquoted.inc",
             r#"@include """#,
             "@section bogus_sec",

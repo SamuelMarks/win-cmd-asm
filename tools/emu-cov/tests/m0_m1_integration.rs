@@ -138,14 +138,14 @@ fn wincmd_com_detects_corrupted_transient_and_reloads_from_comspec() -> Result<(
     vm.load_com(&com_bytes, " /C ECHO Reloaded-OK", &[])?;
 
     let mut corrupted = false;
-    for _ in 0..300_000 {
+    for _ in 0..500_000 {
         vm.step()?;
         if !corrupted
             && vm.coverage.executed_pcs.len() > 80
             && vm.sregs[DosVm::CS] == DosVm::DEFAULT_PSP_SEG
         {
-            // Corrupt relocated high-memory TRANSIENT at (0xA000 - 0x0680) = 0x9980:0x0004!
-            vm.write_u8(0x9980, 0x0004, 0xCC);
+            // Corrupt relocated high-memory TRANSIENT at (0xA000 - 0x0A20) = 0x95E0:0x0004!
+            vm.write_u8(0x95E0, 0x0004, 0xCC);
             corrupted = true;
             break;
         }

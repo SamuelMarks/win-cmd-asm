@@ -21,6 +21,9 @@ pub(crate) const CON_IN_SENTINEL: &str = "*CON_IN*";
 /// Sentinel path representing the unredirected console `stdout` device in `DUP`/`DUP2`.
 pub(crate) const CON_OUT_SENTINEL: &str = "*CON_OUT*";
 
+/// Sentinel path representing the DOS `NUL` character sink/EOF device.
+pub(crate) const NUL_SENTINEL: &str = "*NUL*";
+
 /// Metadata stored per virtual filesystem path inside [`DosVm`].
 #[derive(Clone, Debug, Default)]
 pub struct VfsMeta {
@@ -622,6 +625,7 @@ impl DosVm {
 
     pub(crate) fn handle_dos200_find(&mut self, is_first: bool) {
         if is_first {
+            let req_attr = self.regs[1];
             let raw_pat = self.read_asciiz(self.sregs[Self::DS], self.regs[2]);
             let norm_pat = self.norm_vfs_key(&raw_pat);
             let clean_pat = Self::strip_a_root(&norm_pat);
@@ -629,10 +633,16 @@ impl DosVm {
                 .rsplit_once(BS)
                 .map_or(("", clean_pat), |(d, f)| (d, f));
             let mut results = Vec::new();
-            for d in &self.dirs {
-                let (dp, dl) = d.rsplit_once(BS).map_or(("", d.as_str()), |(p, l)| (p, l));
-                if dp == dir_pfx && Self::simple_glob(pat_leaf, dl) {
-                    results.push((dl.to_owned(), 0x10_u8, 0_u32));
+            if (req_attr & 0x0010) != 0 {
+                for d in &self.dirs {
+                    let dc = Self::strip_a_root(d);
+                    if dc.is_empty() {
+                        continue;
+                    }
+                    let (dp, dl) = dc.rsplit_once(BS).map_or(("", dc), |(p, l)| (p, l));
+                    if dp == dir_pfx && Self::simple_glob(pat_leaf, dl) {
+                        results.push((dl.to_owned(), 0x10_u8, 0_u32));
+                    }
                 }
             }
             for (k, bytes) in &self.vfs {
@@ -648,12 +658,18 @@ impl DosVm {
                     results.push((fl.to_owned(), attr, u32::try_from(bytes.len()).unwrap_or(0)));
                 }
             }
-            self.dta_search = results;
-            self.dta_search_idx = 0;
+            self.dta_searches.insert(self.dta, (results, 0));
         }
 
-        if let Some((name, attr, sz)) = self.dta_search.get(self.dta_search_idx).cloned() {
-            self.dta_search_idx += 1;
+        let next_entry = self.dta_searches.get_mut(&self.dta).and_then(|(list, idx)| {
+            let item = list.get(*idx).cloned();
+            if item.is_some() {
+                *idx += 1;
+            }
+            item
+        });
+
+        if let Some((name, attr, sz)) = next_entry {
             let (seg, off) = self.dta;
             self.write_u8(seg, off.wrapping_add(21), attr);
             let sb = sz.to_le_bytes();
@@ -860,6 +876,23 @@ impl DosVm {
             }
             0x716C => {
                 let raw = self.read_asciiz(ds, self.regs[6]);
+                if Self::is_nul_device(&raw) {
+                    match self.alloc_file_handle(OpenFile {
+                        path: String::from(NUL_SENTINEL),
+                        pos: 0,
+                    }) {
+                        Ok(h) => {
+                            self.regs[0] = h;
+                            self.regs[1] = 1;
+                            self.set_cf(false);
+                        }
+                        Err(e) => {
+                            self.regs[0] = e.code();
+                            self.set_cf(true);
+                        }
+                    }
+                    return;
+                }
                 let key = self.norm_vfs_key(&raw);
                 let action = self.regs[2];
                 let exists = self.vfs.contains_key(&key);
@@ -1101,7 +1134,7 @@ impl DosVm {
         if self.corrupt_high_ram_on_exec {
             let trn_seg = self
                 .read_u16(Self::DEFAULT_PSP_SEG, 0x0002)
-                .wrapping_sub(0x0680);
+                .wrapping_sub(0x0A20);
             self.write_u8(trn_seg, 0x0004, 0xCC);
         }
         self.last_child_exit_code = child_code;
@@ -1129,6 +1162,11 @@ impl DosVm {
             0x40 => self.set_reg8(4, 0x00),
             0x41 => {
                 self.regs[3] = 0xE000;
+                self.set_reg8(4, 0x00);
+            }
+            0x42 => {
+                self.regs[3] = 64;
+                self.regs[2] = 64;
                 self.set_reg8(4, 0x00);
             }
             0x43 => {
@@ -1294,10 +1332,25 @@ impl DosVm {
         }
     }
 
+    /// Returns `true` if `raw` names the DOS `NUL` character device (`NUL`, `NUL:`, `NUL.TXT`, `A:\...\NUL`).
+    #[must_use]
+    pub(crate) fn is_nul_device(raw: &str) -> bool {
+        let leaf = raw.rsplit([BS, '/']).next().unwrap_or(raw).trim();
+        let no_colon = leaf.strip_suffix(':').unwrap_or(leaf);
+        let stem = no_colon
+            .split_once('.')
+            .map_or(no_colon, |(s, _)| s)
+            .trim();
+        stem.eq_ignore_ascii_case("NUL")
+    }
+
     pub(crate) fn read_stdin_char_for_dos(&mut self) -> u8 {
         if let Some((path, pos)) = self.handles.get(&0).map(|of| (of.path.clone(), of.pos))
             && path != CON_IN_SENTINEL
         {
+            if path == NUL_SENTINEL {
+                return 0x1A;
+            }
             let data = self.vfs.get(&path).map_or(&[][..], Vec::as_slice);
             if pos < data.len() {
                 let b = data[pos];
@@ -1321,6 +1374,9 @@ impl DosVm {
         if let Some((path, pos)) = self.handles.get(&1).map(|of| (of.path.clone(), of.pos))
             && path != CON_OUT_SENTINEL
         {
+            if path == NUL_SENTINEL {
+                return;
+            }
             let entry = self.vfs.entry(path).or_default();
             if pos + bytes.len() > entry.len() {
                 entry.resize(pos + bytes.len(), 0);

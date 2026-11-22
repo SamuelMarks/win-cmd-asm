@@ -6,6 +6,7 @@ TOOLCHAIN ?= all
 TARGET ?= all
 BUILD_DIR ?= build
 DIST_DIR ?= dist/src
+DOS_OS ?= msdos
 
 .PHONY: all lint lower build verify test fuzz coverage ci-list ci-local ci-docker ci-dos-qemu hooks clean
 
@@ -44,7 +45,7 @@ ci-docker:
 	@bash ./ci/replicate_ci.sh --only docker-alpine
 
 ci-dos-qemu:
-	@sh ./ci/run_dos_qemu_matrix.sh --os all --toolchain nasm --build-dir "$(BUILD_DIR)"
+	@sh ./ci/run_dos_qemu_matrix.sh --os "$(DOS_OS)" --toolchain nasm --build-dir "$(BUILD_DIR)"
 
 hooks:
 	@chmod +x .githooks/pre-commit

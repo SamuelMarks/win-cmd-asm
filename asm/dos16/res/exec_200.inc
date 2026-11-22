@@ -105,6 +105,7 @@
     mov word [wExecRetAx], ax
 
 .after_code:
+    mov byte [bNeedTrnCheck], 1
     call res_ensure_transient
 
     mov es, word [wResSavedSS]

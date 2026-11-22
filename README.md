@@ -1,5 +1,6 @@
 # win-cmd-asm
 
+[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 ![doc coverage](https://img.shields.io/badge/doc%20coverage-100.00%25-brightgreen)
 ![test coverage](https://img.shields.io/badge/test%20coverage-88.95%25-green)
 

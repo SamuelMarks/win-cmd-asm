@@ -165,7 +165,7 @@
 @proc stream_read_batch_line
     push bp
     mov bp, sp
-    sub sp, 14
+    sub sp, 16
     ; [bp-2]  = out_buf
     ; [bp-4]  = out_len
     ; [bp-6]  = frame_off (in wTrnResSeg)
@@ -173,8 +173,11 @@
     ; [bp-10] = path_copy (48B in arena)
     ; [bp-12] = dialect
     ; [bp-14] = flags
+    ; [bp-16] = arena_mark
     mov word [bp - 2], di
     mov word [bp - 4], 0
+    mov ax, word [wArenaPtr]
+    mov word [bp - 16], ax
 
     mov cx, 384
     call arena_alloc
@@ -311,13 +314,12 @@
     add dx, cx
     call stream_adv_frame_off
     cmp word [bp - 4], 0
-    jne .finish_ok_line
+    jne .j_fin_ln0
     jmp .eof_pop
 
 .chk_need_more:
-    cmp word [bp - 4], 0
-    je .eof_pop
-    ; If line already started without newline at EOF, return it!
+    jmp .refill_chunk
+.j_fin_ln0:
     jmp .finish_ok_line
 
 .not_ctrlz:
@@ -351,8 +353,34 @@
     add sp, 4
     call stream_adv_frame_off
     jmp .check_caret_fold
-.cr_not_lf:
 .cr_no_lf:
+    pop cx
+    pop si
+    push es
+    mov es, word [wTrnResSeg]
+    mov bx, word [bp - 6]
+    mov dx, word [es:bx + BATCH_FRAME.dwFileOff]
+    mov cx, word [es:bx + BATCH_FRAME.dwFileOff + 2]
+    pop es
+    mov si, word [bp - 10]
+    mov di, word [bp - 8]
+    call stream_open_read_close
+    jc .check_caret_fold
+    test ax, ax
+    jz .check_caret_fold
+    mov cx, ax
+    mov si, word [bp - 8]
+    push si
+    push cx
+    mov bl, byte [bp - 14]
+    call stream_decode_unit
+    jc .cr_not_lf
+    cmp al, 0x0A
+    jne .cr_not_lf
+    add sp, 4
+    call stream_adv_frame_off
+    jmp .check_caret_fold
+.cr_not_lf:
     pop cx
     pop si
     jmp .check_caret_fold
@@ -384,10 +412,12 @@
     jmp .refill_chunk
 
 .finish_ok_line:
+    mov ax, word [bp - 16]
+    mov word [wArenaPtr], ax
     mov di, word [bp - 2]
     mov bx, word [bp - 4]
     mov byte [di + bx], 0
-    add sp, 14
+    add sp, 16
     pop bp
     clc
     ret
@@ -400,8 +430,11 @@
     dec byte [es:resState + RES_STATE.bBatchDepth]
 .no_dec_b:
     pop es
+    call env_unwind_batch_locals
 .eof_fail:
-    add sp, 14
+    mov ax, word [bp - 16]
+    mov word [wArenaPtr], ax
+    add sp, 16
     pop bp
     stc
     ret

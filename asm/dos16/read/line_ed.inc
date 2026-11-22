@@ -389,13 +389,127 @@
     ret
 @endproc
 
+;; @proc led_winoldap_copy
+;; @abi dos16
+;; @in BP = edited line buffer in DS, CX = current byte length
+;; @out Copies active line to Windows Clipboard as CF_OEMTEXT (DX=7) via INT 2Fh AX=1701h..1708h
+;; @err none
+;; @clobbers ax, bx, dx, si, di
+;; @desc Exposes Windows 3.x/9x WINOLDAP Clipboard copy from DOS interactive sessions.
+@proc led_winoldap_copy
+    push cx
+    mov ax, 0x1700
+    int 0x2F
+    cmp ax, 0x1700
+    je .done
+    mov ax, 0x1701
+    int 0x2F
+    test ax, ax
+    jz .done
+    mov ax, 0x1702
+    int 0x2F
+    pop cx
+    push cx
+    mov si, bp
+    mov di, TRN_CMD_WORK
+    mov bx, cx
+    cld
+    rep movsb
+    mov byte [di], 0
+    mov cx, bx
+    inc cx
+    xor si, si
+    mov bx, TRN_CMD_WORK
+    mov dx, 7
+    mov ax, 0x1703
+    int 0x2F
+    mov ax, 0x1708
+    int 0x2F
+.done:
+    pop cx
+    ret
+@endproc
+
+;; @proc led_winoldap_paste
+;; @abi dos16
+;; @in BP = edited line buffer in DS, CX = current byte length
+;; @out Appends CF_OEMTEXT/CF_TEXT from WINOLDAP Clipboard (INT 2Fh AX=1701h..1708h) and updates CX
+;; @err none
+;; @clobbers ax, bx, cx, dx, si, di
+;; @desc Exposes Windows 3.x/9x WINOLDAP Clipboard paste into DOS interactive sessions.
+@proc led_winoldap_paste
+    mov si, cx
+    mov ax, 0x1700
+    int 0x2F
+    cmp ax, 0x1700
+    je .done_restore
+    mov ax, 0x1701
+    int 0x2F
+    test ax, ax
+    jz .done_restore
+
+    mov dx, 7
+    mov ax, 0x1704
+    int 0x2F
+    test ax, ax
+    jnz .fetch_clip
+    mov dx, 1
+    mov ax, 0x1704
+    int 0x2F
+    test ax, ax
+    jz .close_clip
+
+.fetch_clip:
+    cmp ax, 256
+    ja .close_clip
+    mov bx, TRN_CMD_WORK
+    mov ax, 0x1705
+    int 0x2F
+    test ax, ax
+    jz .close_clip
+
+    mov di, TRN_CMD_WORK
+.append_lp:
+    mov al, byte [di]
+    test al, al
+    jz .close_clip
+    cmp al, 0x0D
+    je .close_clip
+    cmp al, 0x0A
+    je .skip_lf
+    cmp si, 125
+    jae .close_clip
+    mov bx, bp
+    add bx, si
+    mov byte [bx], al
+    inc si
+    push si
+    push di
+    mov dl, al
+    call led_emit_ch
+    pop di
+    pop si
+.skip_lf:
+    inc di
+    jmp .append_lp
+
+.close_clip:
+    push si
+    mov ax, 0x1708
+    int 0x2F
+    pop si
+.done_restore:
+    mov cx, si
+    ret
+@endproc
+
 ;; @proc led_read_line
 ;; @abi dos16
 ;; @in DS:DI = 128-byte line buffer, TRN_HIST_BUF = 128-byte template/history buffer
 ;; @out NUL-terminated edited line at DS:DI, CX = length, CF=0 (or CF=1 on EOF)
 ;; @err CF=1 when stdin reaches 0x1A EOF with 0 chars read
 ;; @clobbers ax, bx, cx, dx, si, di
-;; @desc Interactive line editor supporting F1/F3 template, DOSKEY recall, Esc, and DBCS-safe Bksp.
+;; @desc Interactive line editor supporting F1/F3 template, DOSKEY recall, WINOLDAP clip, and DBCS Bksp.
 @proc led_read_line
     push bp
     mov bp, di
@@ -417,17 +531,21 @@
     cmp ah, KEY_ACT_BKSP
     je .do_bksp
     cmp ah, KEY_ACT_ESC
-    je .do_esc
+    je .go_esc
     cmp ah, KEY_ACT_F1
-    je .do_f1
+    je .go_f1
     cmp ah, KEY_ACT_F3
     je .go_f3
     cmp ah, KEY_ACT_UP
     je .go_up
     cmp ah, KEY_ACT_DOWN
-    je .do_esc
+    je .go_esc
     cmp ah, KEY_ACT_TAB
     je .go_tab
+    cmp al, 0x16
+    je .go_paste
+    cmp al, 0x0B
+    je .go_copy
 
     cmp cx, 125
     jae .key_lp
@@ -441,6 +559,16 @@
     pop cx
     jmp .key_lp
 
+.go_paste:
+    call led_winoldap_paste
+    jmp .key_lp
+.go_copy:
+    call led_winoldap_copy
+    jmp .key_lp
+.go_esc:
+    jmp .do_esc
+.go_f1:
+    jmp .do_f1
 .go_f3:
     jmp .do_f3
 .go_up:
@@ -449,15 +577,18 @@
     call led_tab_complete
     jmp .key_lp
 
+.j_key0:
+    jmp .key_lp
+
 .do_bksp:
     test cx, cx
-    jz .key_lp
+    jz .j_key0
     dec cx
     push cx
     call led_erase_one
     pop cx
     test cx, cx
-    jz .key_lp
+    jz .j_key0
     mov bx, bp
     add bx, cx
     dec bx
@@ -465,7 +596,7 @@
     push cx
     call dbcs_is_lead
     pop cx
-    jnc .key_lp
+    jnc .j_key0
     dec cx
     push cx
     call led_erase_one

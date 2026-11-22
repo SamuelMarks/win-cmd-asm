@@ -10,6 +10,7 @@ struct ModuleBuildState {
     cpu: Option<CpuIsa>,
     format: BinaryFormat,
     entry: Option<String>,
+    safeseh: Option<String>,
     pending_doc: DocBlock,
     items: Vec<TopItem>,
 }
@@ -27,6 +28,7 @@ pub fn parse_canonical(file_path: &str, source: &str) -> Result<CanonicalModule,
         cpu: None,
         format: BinaryFormat::Include,
         entry: None,
+        safeseh: None,
         pending_doc: DocBlock::default(),
         items: Vec::new(),
     };
@@ -99,6 +101,7 @@ pub fn parse_canonical(file_path: &str, source: &str) -> Result<CanonicalModule,
         cpu: st.cpu,
         format: st.format,
         entry: st.entry,
+        safeseh: st.safeseh,
         items: st.items,
     })
 }
@@ -135,6 +138,16 @@ fn parse_top_directive(
                 });
             }
             st.entry = Some(arg_str.to_owned());
+            Ok(idx + 1)
+        }
+        "safeseh" => {
+            if arg_str.is_empty() {
+                return Err(ToolError::Syntax {
+                    span,
+                    message: "@safeseh requires a handler symbol name".into(),
+                });
+            }
+            st.safeseh = Some(arg_str.to_owned());
             Ok(idx + 1)
         }
         "include" => {

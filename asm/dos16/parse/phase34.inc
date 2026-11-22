@@ -104,10 +104,12 @@
 .active_for:
     push bp
     mov bp, sp
-    sub sp, 6
-    ; [bp-2]=out_buf, [bp-4]=out_len, [bp-6]=mod_work (256B)
+    sub sp, 8
+    ; [bp-2]=out_buf, [bp-4]=out_len, [bp-6]=mod_work (256B), [bp-8]=arena_mark
     mov word [bp - 2], di
     mov word [bp - 4], 0
+    mov ax, word [wArenaPtr]
+    mov word [bp - 8], ax
 
     push si
     mov cx, 260
@@ -116,7 +118,7 @@
     jnc .p3_mem
     mov di, word [bp - 2]
     mov byte [di], 0
-    add sp, 6
+    add sp, 8
     pop bp
     ret
 .p3_mem:
@@ -125,7 +127,22 @@
 .p3_lp:
     mov al, byte [si]
     test al, al
-    jz .p3_done
+    jz .j_p3_done
+    cmp al, 0x81
+    jb .p3_ascii
+    call dbcs_is_lead
+    jnc .p3_ascii
+    cmp byte [si + 1], 0
+    je .p3_ascii
+    call p34_append_al
+    inc si
+    mov al, byte [si]
+    call p34_append_al
+    inc si
+    jmp .p3_lp
+.j_p3_done:
+    jmp .p3_done
+.p3_ascii:
     cmp al, '%'
     je .p3_pct
     call p34_append_al
@@ -183,10 +200,12 @@
     jmp .p3_lp
 
 .p3_done:
+    mov ax, word [bp - 8]
+    mov word [wArenaPtr], ax
     mov di, word [bp - 2]
     mov bx, word [bp - 4]
     mov byte [di + bx], 0
-    add sp, 6
+    add sp, 8
     pop bp
     ret
 @endproc
@@ -201,10 +220,12 @@
 @proc phase4_expand
     push bp
     mov bp, sp
-    sub sp, 12
-    ; [bp-2]=out_buf, [bp-4]=out_len, [bp-6]=val_buf, [bp-8]=xf_buf, [bp-10]=delayed_on, [bp-12]=dialect
+    sub sp, 14
+    ; [bp-2]=out_buf, [bp-4]=out_len, [bp-6]=val_buf, [bp-8]=xf_buf, [bp-10]=delayed_on, [bp-12]=dialect, [bp-14]=arena_mark
     mov word [bp - 2], di
     mov word [bp - 4], 0
+    mov ax, word [wArenaPtr]
+    mov word [bp - 14], ax
 
     push es
     mov es, word [wTrnResSeg]
@@ -221,7 +242,7 @@
     jnc .p4_mem
     mov di, word [bp - 2]
     mov byte [di], 0
-    add sp, 12
+    add sp, 14
     pop bp
     ret
 .p4_mem:
@@ -236,6 +257,21 @@
     jnz .p4_non_nul
     jmp .p4_done
 .p4_non_nul:
+    cmp al, 0x81
+    jb .p4_ascii
+    push dx
+    call dbcs_is_lead
+    pop dx
+    jnc .p4_ascii
+    cmp byte [si + 1], 0
+    je .p4_ascii
+    call p34_append_al
+    inc si
+    mov al, byte [si]
+    call p34_append_al
+    inc si
+    jmp .p4_lp
+.p4_ascii:
     cmp al, '"'
     jne .p4_not_q
     xor dl, 1
@@ -259,20 +295,21 @@
 .p4_caret_nodelay:
     ; Outside quotes in NT_CMD/FREEDOS (dialect >= 5), '^c' strips caret and emits 'c'!
     test dl, dl
-    jnz .emit_p4_ch
+    jnz .j_emit_p4
     cmp byte [bp - 12], 5
-    jb .emit_p4_ch
+    jb .j_emit_p4
     cmp byte [si + 1], 0
-    je .emit_p4_ch
+    je .j_emit_p4
     inc si
     mov al, byte [si]
+.j_emit_p4:
     jmp .emit_p4_ch
 
 .p4_chk_bang:
     cmp al, '!'
-    jne .emit_p4_ch
+    jne .j_emit_p4
     cmp byte [bp - 10], 0
-    je .emit_p4_ch
+    je .j_emit_p4
 
     ; Scan for closing '!' on same line
     inc si
@@ -355,10 +392,12 @@
     jmp .p4_lp
 
 .p4_done:
+    mov ax, word [bp - 14]
+    mov word [wArenaPtr], ax
     mov di, word [bp - 2]
     mov bx, word [bp - 4]
     mov byte [di + bx], 0
-    add sp, 12
+    add sp, 14
     pop bp
     ret
 @endproc
@@ -447,9 +486,9 @@
 .do_one:
     mov al, byte [di + AST_REDIR_NODE.bKind]
     cmp al, REDIR_DUP_OUT
-    je .do_dup_fd
+    je .j_dup_fd
     cmp al, REDIR_DUP_IN
-    je .do_dup_fd
+    je .j_dup_fd
 
     ; Expand target filename via Phase 3 + Phase 4!
     mov si, word [di + AST_REDIR_NODE.wTarget]
@@ -459,17 +498,30 @@
     mov di, word [bp - 8]
     call phase4_expand
 
+    ; Canonicalize any NUL device alias (NUL:, C:\DIR\NUL.TXT, \\.\NUL) to bare "NUL"
+    mov si, word [bp - 8]
+    call dev_match_name
+    jc .not_nul_redir
+    cmp al, DEV_NUL
+    jne .not_nul_redir
+    mov di, word [bp - 8]
+    mov byte [di], 'N'
+    mov byte [di + 1], 'U'
+    mov byte [di + 2], 'L'
+    mov byte [di + 3], 0
+.not_nul_redir:
+
     mov di, word [bp - 4]
     cmp byte [bTrnDosMajor], 2
-    jb .do_125_redir
+    jb .j_125_redir
 
     ; Save original FD (0, 1, or 2) into save_blk if not already saved
     xor bh, bh
     mov bl, byte [di + AST_REDIR_NODE.bFd]
     cmp bl, 2
-    ja .next_rnode
+    ja .j_next_rn
     call ast_save_orig_fd
-    jc .redir_err
+    jc .j_r_err
 
     mov di, word [bp - 4]
     mov al, byte [di + AST_REDIR_NODE.bKind]
@@ -482,8 +534,17 @@
     mov dx, word [bp - 8]
     xor cx, cx
     call k200_create
-    jc .redir_err
+    jc .j_r_err
     jmp .dup_onto_fd
+
+.j_dup_fd:
+    jmp .do_dup_fd
+.j_125_redir:
+    jmp .do_125_redir
+.j_next_rn:
+    jmp .next_rnode
+.j_r_err:
+    jmp .redir_err
 
 .open_r_app:
     mov dx, word [bp - 8]
@@ -501,14 +562,14 @@
     mov dx, word [bp - 8]
     xor cx, cx
     call k200_create
-    jc .redir_err
+    jc .j_r_err
     jmp .dup_onto_fd
 
 .open_r_in:
     mov dx, word [bp - 8]
     xor al, al
     call k200_open
-    jc .redir_err
+    jc .j_r_err
 
 .dup_onto_fd:
     mov bx, ax
@@ -519,28 +580,50 @@
     pushf
     call k200_close
     popf
-    jc .redir_err
+    jc .j_r_err
     jmp .next_rnode
 
 .do_dup_fd:
     cmp byte [bTrnDosMajor], 2
-    jb .next_rnode
+    jb .j_next_rn
     xor bh, bh
     mov bl, byte [di + AST_REDIR_NODE.bFd]
     cmp bl, 2
-    ja .next_rnode
+    ja .j_next_rn
     call ast_save_orig_fd
-    jc .redir_err
+    jc .j_r_err
     mov di, word [bp - 4]
     mov bx, word [di + AST_REDIR_NODE.wTarget]
     xor ch, ch
     mov cl, byte [di + AST_REDIR_NODE.bFd]
     call k200_dup2
-    jc .redir_err
+    jc .j_r_err
     jmp .next_rnode
 
 .do_125_redir:
-    ; Delegate DOS 1.25 FCB '<', '>', '>>' onto resident fcbRedirIn / fcbRedirOut!
+    ; Delegate DOS 1.25 FCB '<', '>', '>>' onto resident fcbRedirIn / fcbRedirOut (or NUL flags)!
+    mov si, word [bp - 8]
+    call dev_match_name
+    jc .r125_fcb
+    cmp al, DEV_NUL
+    jne .r125_fcb
+    mov di, word [bp - 4]
+    push es
+    mov es, word [wTrnResSeg]
+    cmp byte [di + AST_REDIR_NODE.bKind], REDIR_IN
+    je .r125_nul_in
+    or byte [es:bRedirFlags], REDIR125_NUL_OUT
+    jmp .r125_nul_go
+.r125_nul_in:
+    or byte [es:bRedirFlags], REDIR125_NUL_IN
+.r125_nul_go:
+    pop es
+    mov byte [bTrnRedirActive], 1
+    call far [wTrnRed125InPtr]
+    jmp .next_rnode
+
+.r125_fcb:
+    mov di, word [bp - 4]
     mov al, byte [di + AST_REDIR_NODE.bKind]
     cmp al, REDIR_IN
     jne .r125_out
@@ -726,9 +809,11 @@
 .exec_simple:
     push bp
     mov bp, sp
-    sub sp, 12
-    ; [bp-6..bp-1]=6B redir save, [bp-8]=node, [bp-10]=p3_buf, [bp-12]=p4_buf
+    sub sp, 14
+    ; [bp-6..bp-1]=6B redir save, [bp-8]=node, [bp-10]=p3_buf, [bp-12]=p4_buf, [bp-14]=arena_mark
     mov word [bp - 8], di
+    mov ax, word [wArenaPtr]
+    mov word [bp - 14], ax
 
     ; Save resident redir state in case child .COM reloads TRANSIENT!
     mov bx, bp
@@ -757,11 +842,13 @@
     call trn_exec_stmt
 
 .sc_restore:
+    mov ax, word [bp - 14]
+    mov word [wArenaPtr], ax
     mov bx, bp
     sub bx, 6
     call ast_restore_redir_list
 .sc_exit:
-    add sp, 12
+    add sp, 14
     pop bp
     ret
 @endproc
@@ -874,7 +961,9 @@
     ; 1. Redirect stdout -> spool file and run LHS (wA)
     mov cx, 8
     call arena_alloc
-    jc .dec_pipe
+    jnc .sp_lhs_ok
+    jmp .dec_pipe
+.sp_lhs_ok:
     mov byte [di + AST_REDIR_NODE.bKind], REDIR_OUT_TRUNC
     mov byte [di + AST_REDIR_NODE.bFd], 1
     mov ax, word [bp - 10]
@@ -944,14 +1033,16 @@
 @proc ast_exec_if
     push bp
     mov bp, sp
-    sub sp, 12
-    ; [bp-2]=node, [bp-4]=lhs_exp, [bp-6]=rhs_exp, [bp-8]=tmp_p3, [bp-12..bp-9]=lhs_i32
+    sub sp, 14
+    ; [bp-2]=node, [bp-4]=lhs_exp, [bp-6]=rhs_exp, [bp-8]=tmp_p3, [bp-12..bp-9]=lhs_i32, [bp-14]=arena_mark
     mov word [bp - 2], di
+    mov ax, word [wArenaPtr]
+    mov word [bp - 14], ax
 
     mov cx, 420
     call arena_alloc
     jnc .if_mem
-    add sp, 12
+    add sp, 14
     pop bp
     ret
 .if_mem:
@@ -1001,9 +1092,9 @@
     mov si, word [bp - 4]
     call parse_i32_lit
     mov cx, 0
-    jc .apply_not
+    jc .j_apply_not
     cmp word [wTrnExitCode], ax
-    jb .apply_not
+    jb .j_apply_not
     mov cx, 1
     jmp .apply_not
 
@@ -1011,9 +1102,9 @@
     mov si, word [bp - 4]
     call parse_i32_lit
     mov cx, 0
-    jc .apply_not
+    jc .j_apply_not
     cmp ax, 2
-    ja .apply_not
+    ja .j_apply_not
     mov cx, 1
     jmp .apply_not
 
@@ -1023,11 +1114,17 @@
     mov di, word [bp - 8]
     call env_get_var
     mov cx, 0
-    jc .apply_not
+    jc .j_apply_not
     mov cx, 1
     jmp .apply_not
 
 .c_exist:
+    mov si, word [bp - 4]
+    call dev_match_name
+    jc .c_exist_fs
+    mov cx, 1
+    jmp .apply_not
+.c_exist_fs:
     cmp byte [bTrnDosMajor], 2
     jb .ex_125
     mov dx, word [bp - 4]
@@ -1035,7 +1132,7 @@
     mov cx, 0x0016
     call k200_find_first
     mov cx, 0
-    jc .apply_not
+    jc .j_apply_not
     mov cx, 1
     jmp .apply_not
 .ex_125:
@@ -1043,10 +1140,11 @@
     mov di, word [bp - 8]
     call k125_open
     mov cx, 0
-    jc .apply_not
+    jc .j_apply_not
     mov di, word [bp - 8]
     call k125_close
     mov cx, 1
+.j_apply_not:
     jmp .apply_not
 
 .c_str_eq:
@@ -1188,11 +1286,13 @@
     xor cx, 1
 
 .dispatch_if:
+    mov ax, word [bp - 14]
+    mov word [wArenaPtr], ax
     test cx, cx
     jz .run_else
     mov di, word [bx + AST_NODE.wC]
     call ast_exec_node
-    add sp, 12
+    add sp, 14
     pop bp
     ret
 .run_else:
@@ -1201,7 +1301,7 @@
     jz .if_done
     call ast_exec_node
 .if_done:
-    add sp, 12
+    add sp, 14
     pop bp
     ret
 @endproc
@@ -1269,8 +1369,10 @@
     je .go_for_l
     cmp al, FORMODE_PARSE
     je .go_for_f
+    cmp al, FORMODE_RECURSE
+    je .go_for_r
 
-    ; --- FORMODE_PLAIN / FORMODE_DIRS / FORMODE_RECURSE ---
+    ; --- FORMODE_PLAIN / FORMODE_DIRS ---
     mov si, word [bx + AST_NODE.wA]
     mov word [bp - 22], si
 
@@ -1299,6 +1401,9 @@
     jmp .exec_for_l
 .go_for_f:
     jmp .exec_for_f
+.go_for_r:
+    call ast_exec_for_r
+    jmp .for_exit
 
 .read_item:
     mov di, word [bp - 6]
@@ -1357,7 +1462,9 @@
     ; Allocate private 48B DTA inside arena before restoring watermark!
     mov cx, 48
     call arena_alloc
-    jc .set_item_lp
+    jnc .got_w_dta
+    jmp .set_item_lp
+.got_w_dta:
     mov word [bp - 24], di
     mov ax, word [wArenaPtr]
     mov word [bp - 26], ax
@@ -1553,7 +1660,7 @@
     ; Parse optional "opts" string in wB!
     mov di, word [si + AST_NODE.wB]
     test di, di
-    jz .inspect_f_set
+    jz .j_insp_f0
     mov si, di
     cmp byte [si], '"'
     jne .opt_lp
@@ -1561,13 +1668,19 @@
 .opt_lp:
     mov al, byte [si]
     test al, al
-    jz .inspect_f_set
+    jz .j_insp_f0
     cmp al, '"'
-    je .inspect_f_set
+    je .j_insp_f0
     cmp al, 0x20
     jne .chk_opt_eol
     inc si
     jmp .opt_lp
+
+.j_insp_f0:
+    jmp .inspect_f_set
+.j_sk_opt0:
+    jmp .sk_opt_w
+
 .chk_opt_eol:
     ; Check eol=c
     mov ah, al
@@ -1575,7 +1688,7 @@
     cmp ah, 'E'
     jne .chk_opt_skip
     cmp byte [si + 3], '='
-    jne .sk_opt_w
+    jne .j_sk_opt0
     mov al, byte [si + 4]
     mov byte [bp - 6], al
     add si, 5
@@ -1584,7 +1697,7 @@
     cmp ah, 'S'
     jne .chk_opt_delims
     cmp byte [si + 4], '='
-    jne .sk_opt_w
+    jne .j_sk_opt0
     add si, 5
     call var_parse_signed16
     mov word [bp - 8], ax
@@ -1593,13 +1706,13 @@
     cmp ah, 'D'
     jne .chk_opt_tokens
     cmp byte [si + 6], '='
-    jne .sk_opt_w
+    jne .j_sk_opt0
     add si, 7
     push si
     mov cx, 16
     call arena_alloc
     pop si
-    jc .inspect_f_set
+    jc .j_insp_f0
     mov word [bp - 10], di
 .cp_dlm:
     mov al, byte [si]
@@ -1623,6 +1736,11 @@
     jmp .opt_lp
 
 .chk_opt_tokens:
+    cmp ah, 'U'
+    jne .chk_t_kw
+    or byte [bp - 12], 4 ; bit2 = usebackq!
+    jmp .sk_opt_w
+.chk_t_kw:
     cmp ah, 'T'
     jne .sk_opt_w
     cmp byte [si + 6], '='
@@ -1636,7 +1754,7 @@
     cmp al, '"'
     je .inspect_f_set
     cmp al, 0x20
-    je .inspect_f_set
+    je .j_opt_lp2
     cmp al, '2'
     jne .chk_t_star
     or byte [bp - 12], 1
@@ -1647,6 +1765,8 @@
 .adv_t_opt:
     inc si
     jmp .tok_opt_lp
+.j_opt_lp2:
+    jmp .opt_lp
 
 .sk_opt_w:
     inc si
@@ -1664,26 +1784,39 @@
     mov si, word [bx + AST_NODE.wA]
     call lex_skip_hspace
 
-    ; Case 1: "literal string" (or 'command' / `command`)
+    test byte [bp - 12], 4
+    jnz .insp_usebackq
+
+    ; Classic mode (no usebackq): "literal string", 'command', `command`, or file
     cmp al, '"'
     je .f_lit_str
-    cmp al, 0x27 ; ''' command!
+    cmp al, 0x27
     je .f_cmd_quote
     cmp al, '`'
     je .f_cmd_quote
+    jmp .f_file_set
 
-    ; Case 3: File set! Read up to 512B from file into arena and split lines!
+.insp_usebackq:
+    ; usebackq mode: 'literal string', `command`, or "file with spaces" / file
+    cmp al, 0x27
+    je .f_lit_str
+    cmp al, '`'
+    je .f_cmd_quote
+
+.f_file_set:
+    ; Read up to 512B from file into arena and split lines!
     mov cx, 560
     call arena_alloc
     jc .j_f_done
     mov word [bp - 14], di ; file_buf
-    ; Trim trailing spaces on filename at SI
-    mov dx, di
-    add dx, 520
-    mov di, dx
+    add di, 520
     call lex_read_word
     jc .j_f_done
-    mov si, dx
+    mov si, word [bp - 14]
+    add si, 520
+    call ast_unquote_inplace
+    mov si, word [bp - 14]
+    add si, 520
     xor cx, cx
     xor dx, dx
     mov di, word [bp - 14]
@@ -1698,16 +1831,19 @@
     jmp .f_done
 
 .f_lit_str:
+    mov ah, al ; '"' or '''
     inc si
+    push ax
     mov cx, 200
     call arena_alloc
-    jc .f_done
+    pop ax
+    jc .j_f_done
     mov dx, di
 .cp_flit:
     mov al, byte [si]
     test al, al
     jz .end_flit
-    cmp al, '"'
+    cmp al, ah
     je .end_flit
     mov byte [di], al
     inc si
@@ -1722,8 +1858,10 @@
 .f_cmd_quote:
     mov ah, al ; ''' or '`'
     inc si
+    push ax
     mov cx, 640
     call arena_alloc
+    pop ax
     jc .f_done
     mov word [bp - 14], di ; cmd + spool buf
     mov dx, di
@@ -1791,10 +1929,14 @@
 
 .line_lp:
     cmp byte [si], 0
-    je .done_buf
+    je .j_done_buf
     cmp byte [si], 0x1A
-    je .done_buf
+    je .j_done_buf
+    jmp .start_cp_ln
+.j_done_buf:
+    jmp .done_buf
 
+.start_cp_ln:
     mov di, word [bp - 16]
 .cp_ln:
     mov al, byte [si]
@@ -1821,12 +1963,13 @@
     push si
     mov si, word [bp - 16]
     cmp byte [si], 0
-    je .next_ln
+    je .j_next_ln
 
     ; Honor skip=N
     cmp word [bp - 8], 0
     je .chk_eol_c
     dec word [bp - 8]
+.j_next_ln:
     jmp .next_ln
 
 .chk_eol_c:
@@ -1834,9 +1977,9 @@
     call ast_skip_f_delims
     mov al, byte [si]
     test al, al
-    jz .next_ln
+    jz .j_next_ln
     cmp al, byte [bp - 6]
-    je .next_ln
+    je .j_next_ln
 
     ; Extract token 1 at DS:SI
     mov dx, si
@@ -1981,23 +2124,134 @@
 ;; @proc cmd_shift
 ;; @abi dos16
 ;; @in DS:SI = optional [/0..8] argument
-;; @out Increments active BATCH_FRAME.bShiftOff
+;; @out Shifts active batch parameters starting at %0/%1 or /2../8
 ;; @err none
-;; @clobbers ax, bx, cx, dx, si
-;; @desc Implements SHIFT (and SHIFT /n) on the active resident batch frame.
+;; @clobbers ax, bx, cx, dx, si, di
+;; @desc Implements SHIFT and SHIFT [/0..8] on the active resident batch frame.
 @proc cmd_shift
+    call lex_skip_hspace
+    xor dh, dh
+    cmp al, '/'
+    jne .load_frame
+    mov ah, byte [si + 1]
+    cmp ah, '2'
+    jb .load_frame
+    cmp ah, '8'
+    ja .load_frame
+    sub ah, '0'
+    mov dh, ah
+
+.load_frame:
     push es
     mov es, word [wTrnResSeg]
     mov al, byte [es:resState + RES_STATE.bBatchDepth]
     test al, al
-    jz .done
+    jnz .have_sdepth
+    jmp .done
+.have_sdepth:
     dec al
+    mov ch, al ; slot index 0..3
     xor ah, ah
     mov cl, 48
     mul cl
     mov bx, addr(batchResStack)
     add bx, ax
+    test dh, dh
+    jnz .splice_nth
     inc byte [es:bx + BATCH_FRAME.bShiftOff]
+    jmp .done
+
+.splice_nth:
+    add dh, byte [es:bx + BATCH_FRAME.bShiftOff]
+    mov al, ch
+    xor ah, ah
+    mov cl, 64
+    mul cl
+    mov si, TRN_BATCH_ARGS
+    add si, ax
+
+.sp_tok_lp:
+.sp_sk_dlm:
+    mov al, byte [si]
+    test al, al
+    jnz .chk_sp_d
+    jmp .done
+.chk_sp_d:
+    cmp al, 0x20
+    je .sp_adv_d
+    cmp al, 0x09
+    je .sp_adv_d
+    cmp al, ','
+    je .sp_adv_d
+    cmp al, ';'
+    je .sp_adv_d
+    cmp al, '='
+    je .sp_adv_d
+    jmp .sp_at_tok
+.sp_adv_d:
+    inc si
+    jmp .sp_sk_dlm
+
+.sp_at_tok:
+    dec dh
+    mov di, si ; save token start in case dh == 0
+    xor dl, dl
+.sp_sk_tok:
+    mov al, byte [si]
+    test al, al
+    jz .sp_end_tok
+    cmp al, '"'
+    jne .sp_nq
+    xor dl, 1
+    inc si
+    jmp .sp_sk_tok
+.sp_nq:
+    test dl, dl
+    jnz .sp_adv_t
+    cmp al, 0x20
+    je .sp_end_tok
+    cmp al, 0x09
+    je .sp_end_tok
+    cmp al, ','
+    je .sp_end_tok
+    cmp al, ';'
+    je .sp_end_tok
+    cmp al, '='
+    je .sp_end_tok
+.sp_adv_t:
+    inc si
+    jmp .sp_sk_tok
+
+.sp_end_tok:
+    test dh, dh
+    jnz .sp_tok_lp
+
+    ; Skip delimiters after spliced token and compact remainder into DS:DI
+.sp_sk_post:
+    mov al, byte [si]
+    cmp al, 0x20
+    je .sp_adv_p
+    cmp al, 0x09
+    je .sp_adv_p
+    cmp al, ','
+    je .sp_adv_p
+    cmp al, ';'
+    je .sp_adv_p
+    cmp al, '='
+    je .sp_adv_p
+    jmp .sp_compact
+.sp_adv_p:
+    inc si
+    jmp .sp_sk_post
+
+.sp_compact:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .sp_compact
+
 .done:
     pop es
     mov word [wTrnExitCode], 0
@@ -2026,14 +2280,14 @@
     mov cx, 330
     call arena_alloc
     pop si
-    jc .goto_done
+    jc .j_goto_done
     mov word [bp - 2], di
     add di, 68
     mov word [bp - 6], di
 
     mov di, word [bp - 2]
     call lex_read_word
-    jc .goto_done
+    jc .j_goto_done
     mov word [bp - 4], cx
 
     ; Check active batch depth
@@ -2043,6 +2297,7 @@
     test al, al
     jnz .have_bat
     pop es
+.j_goto_done:
     jmp .goto_done
 .have_bat:
     dec al
@@ -2064,6 +2319,7 @@
     mov es, word [wTrnResSeg]
     dec byte [es:resState + RES_STATE.bBatchDepth]
     pop es
+    call env_unwind_batch_locals
     mov word [wTrnExitCode], 0
     jmp .goto_done
 
@@ -2123,7 +2379,263 @@
     ret
 @endproc
 
-@data db bPipeDepth, 0
+;; @proc ast_exec_for_r
+;; @abi dos16
+;; @in [bp-2] = AST_FOR node, [bp-4] = saved_for_depth, [bp-8] = arena_mark
+;; @out Recursively walks root (or current drive/CWD) matching wA pattern in every directory
+;; @err none
+;; @clobbers ax, bx, cx, dx, si, di
+;; @desc Implements FOR /R [[drive:]path] %V IN (set) DO body across DOS 2.00+ hierarchies.
+@proc ast_exec_for_r
+    cmp byte [bTrnDosMajor], 2
+    jae .r_dos2_ok
+    ret
+.r_dos2_ok:
+    push bp
+    mov bp, sp
+    sub sp, 8
+    ; [bp-2]=AST_FOR, [bp-4]=saved_for_depth, [bp-6]=root_buf, [bp-8]=pat_buf
+    mov bx, word [bp]
+    mov ax, word [bx - 2]
+    mov word [bp - 2], ax
+    mov ax, word [bx - 4]
+    mov word [bp - 4], ax
+    mov byte [bForRDepth], 0
+
+    mov cx, 216
+    call arena_alloc
+    jc .exit
+    mov word [bp - 6], di
+    add di, 140
+    mov word [bp - 8], di
+
+    ; Extract pattern token from wA into [bp-8]
+    mov bx, word [bp - 2]
+    mov si, word [bx + AST_NODE.wA]
+    mov di, word [bp - 8]
+    call lex_read_word
+    jc .exit
+    mov si, word [bp - 8]
+    call ast_unquote_inplace
+
+    ; Extract root directory from wB (or query %CD%) into [bp-6]
+    mov bx, word [bp - 2]
+    mov si, word [bx + AST_NODE.wB]
+    test si, si
+    jz .default_cd
+    mov di, word [bp - 6]
+.cp_rt:
+    mov al, byte [si]
+    cmp al, '/'
+    jne .rt_sl
+    mov al, 0x5C
+.rt_sl:
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_rt
+    mov si, word [bp - 6]
+    call ast_unquote_inplace
+    jmp .trim_rt
+
+.default_cd:
+    mov si, addr(szDynCd)
+    mov cx, 2
+    mov di, word [bp - 6]
+    call env_get_var
+
+.trim_rt:
+    ; Strip trailing '\' if length > 2 (so "A:\" -> "A:", "A:\SUB" -> "A:\SUB")
+    mov si, word [bp - 6]
+    call prs_strlen_si
+    cmp cx, 2
+    jbe .start_walk
+    mov bx, si
+    add bx, cx
+    cmp byte [bx - 1], 0x5C
+    jne .start_walk
+    mov byte [bx - 1], 0
+
+.start_walk:
+    mov si, word [bp - 6]
+    call ast_for_r_walk_dir
+
+.exit:
+    add sp, 8
+    pop bp
+    ret
+@endproc
+
+;; @proc ast_for_r_walk_dir
+;; @abi dos16
+;; @in DS:SI = directory prefix ("A:" or "A:\SUB"), BP = ast_exec_for_r frame
+;; @out Matches [bp-8] files in DS:SI, then recurses into child directories (depth <= 4)
+;; @err none
+;; @clobbers ax, bx, cx, dx, si, di
+;; @desc Bounded-depth arena-disciplined recursive directory walker for FOR /R.
+@proc ast_for_r_walk_dir
+    cmp byte [bForRDepth], 4
+    jb .enter_walk
+    ret
+.enter_walk:
+    inc byte [bForRDepth]
+
+    push bp
+    mov bx, bp ; outer ast_exec_for_r BP!
+    mov bp, sp
+    sub sp, 10
+    ; [bp-2]=outer_bp, [bp-4]=dir_ptr, [bp-6]=dta_ptr(48B), [bp-8]=work_path(144B), [bp-10]=mark
+    mov word [bp - 2], bx
+    mov word [bp - 4], si
+    mov ax, word [wArenaPtr]
+    mov word [bp - 10], ax
+
+    mov cx, 196
+    call arena_alloc
+    jnc .walk_mem_ok
+    jmp .leave_walk
+.walk_mem_ok:
+    mov word [bp - 6], di
+    add di, 48
+    mov word [bp - 8], di
+
+    ; 1. Build "<dir>\<pat>" into [bp-8] and match normal files (CX = 0)
+    mov si, word [bp - 4]
+    mov di, word [bp - 8]
+    call ast_join_dir_leaf_pfx
+    mov bx, word [bp - 2]
+    mov si, word [bx - 8]
+.cp_rpat:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_rpat
+
+    mov dx, word [bp - 8]
+    mov di, word [bp - 6]
+    xor cx, cx
+    call k200_find_first
+    jc .walk_subdirs
+.file_lp:
+    ; Build "<dir>\<found_name>" into [bp-8] and execute DO body!
+    mov si, word [bp - 4]
+    mov di, word [bp - 8]
+    call ast_join_dir_leaf_pfx
+    mov bx, word [bp - 6]
+    lea si, [bx + DTA_FIND.szName]
+.cp_fn:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_fn
+
+    push word [wArenaPtr]
+    mov bx, word [bp - 2]
+    mov al, byte [bx - 4]
+    mov byte [bForDepth], al
+    mov si, word [bx - 2]
+    mov al, byte [si + AST_NODE.wFlags]
+    mov si, word [bp - 8]
+    call for_bind_var
+    jc .after_f_iter
+    mov bx, word [bp - 2]
+    mov si, word [bx - 2]
+    mov di, word [si + AST_NODE.wC]
+    call ast_exec_node
+.after_f_iter:
+    mov bx, word [bp - 2]
+    mov al, byte [bx - 4]
+    mov byte [bForDepth], al
+    pop word [wArenaPtr]
+
+    mov di, word [bp - 6]
+    call k200_find_next
+    jnc .file_lp
+
+.walk_subdirs:
+    ; 2. Build "<dir>\*.*" and recurse into subdirectories!
+    mov si, word [bp - 4]
+    mov di, word [bp - 8]
+    call ast_join_dir_leaf_pfx
+    mov byte [di], '*'
+    mov byte [di + 1], '.'
+    mov byte [di + 2], '*'
+    mov byte [di + 3], 0
+
+    mov dx, word [bp - 8]
+    mov di, word [bp - 6]
+    mov cx, ATTR_DIRECTORY
+    call k200_find_first
+    jc .leave_walk
+.sub_lp:
+    mov bx, word [bp - 6]
+    test byte [bx + DTA_FIND.bAttr], ATTR_DIRECTORY
+    jz .sub_nx
+    cmp byte [bx + DTA_FIND.szName], '.'
+    je .sub_nx
+
+    ; Build child "<dir>\<subdir>" into [bp-8] and recurse (preserving BP=[bp-2]!)
+    mov si, word [bp - 4]
+    mov di, word [bp - 8]
+    call ast_join_dir_leaf_pfx
+    mov bx, word [bp - 6]
+    lea si, [bx + DTA_FIND.szName]
+.cp_sd:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_sd
+
+    mov si, word [bp - 8]
+    push bp
+    mov bp, word [bp - 2]
+    call ast_for_r_walk_dir
+    pop bp
+
+.sub_nx:
+    mov di, word [bp - 6]
+    call k200_find_next
+    jnc .sub_lp
+
+.leave_walk:
+    mov ax, word [bp - 10]
+    mov word [wArenaPtr], ax
+    add sp, 10
+    pop bp
+    dec byte [bForRDepth]
+.ret_early:
+    ret
+@endproc
+
+;; @proc ast_join_dir_leaf_pfx
+;; @abi dos16
+;; @in DS:SI = dir prefix, DS:DI = destination buffer
+;; @out Copies DS:SI to DS:DI and appends '\', advancing DI past '\'
+;; @err none
+;; @clobbers ax, si, di
+;; @desc Helper building "<dir>\" prefix for FOR /R path construction.
+@proc ast_join_dir_leaf_pfx
+.lp:
+    mov al, byte [si]
+    test al, al
+    jz .add_sl
+    mov byte [di], al
+    inc si
+    inc di
+    jmp .lp
+.add_sl:
+    mov byte [di], 0x5C
+    inc di
+    ret
+@endproc
+
 @data db szDefDelims, " ", 0x09, 0
 @data db szForFSpoolSuffix, " > _WCF.TMP", 0
 @data db szForFSpoolFile, "_WCF.TMP", 0

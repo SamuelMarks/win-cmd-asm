@@ -2,6 +2,8 @@
 //! stack-balance & `@clobbers`/ABI verifier, ISA opcode purity checker, 3-assembler
 //! equivalence comparator, and binary footprint budget gate.
 
+mod x64_equiv;
+
 use asm_conv::ast::{BinaryFormat, CanonicalModule, DocBlock, ProcKind, Stmt, TopItem};
 use asm_conv::parser::parse_canonical;
 use std::collections::{BTreeMap, BTreeSet};
@@ -174,9 +176,58 @@ fn verify_proc_cfg_and_abi(ctx: &ProcVerifyCtx<'_>) -> Result<(), ToolError> {
         }
     }
 
+    if ctx.isa == CpuIsa::X86_64 {
+        verify_win64_proc_abi(ctx)?;
+    }
     verify_proc_sequential_hazards(ctx)?;
     verify_proc_cfg_stack(ctx, &label_to_pc)?;
     verify_proc_clobbers_and_abi(ctx)
+}
+
+fn verify_win64_proc_abi(ctx: &ProcVerifyCtx<'_>) -> Result<(), ToolError> {
+    let has_call = ctx.body.iter().any(|stmt| {
+        matches!(
+            stmt,
+            Stmt::Instruction { mnemonic, .. } if mnemonic == "call"
+        )
+    });
+    match ctx.kind {
+        ProcKind::Win64Frame {
+            stack_alloc,
+            saved_regs,
+        } => {
+            let total_frame = 8_usize + saved_regs.len() * 8 + (*stack_alloc as usize);
+            if !total_frame.is_multiple_of(16) {
+                return Err(ToolError::AbiLint {
+                    span: ctx.proc_span.clone(),
+                    proc_name: ctx.proc_name.to_owned(),
+                    message: format!(
+                        "Microsoft x64 ABI violation: `(8 + {}*8 + {stack_alloc}) = {total_frame}` is not 16-byte RSP-aligned",
+                        saved_regs.len()
+                    ),
+                });
+            }
+            if has_call && *stack_alloc < 32 {
+                return Err(ToolError::AbiLint {
+                    span: ctx.proc_span.clone(),
+                    proc_name: ctx.proc_name.to_owned(),
+                    message: format!(
+                        "Microsoft x64 ABI violation: non-leaf `@proc_frame` allocates {stack_alloc}B (< mandatory 32B shadow space)"
+                    ),
+                });
+            }
+        }
+        ProcKind::Near | ProcKind::Far => {
+            if has_call {
+                return Err(ToolError::AbiLint {
+                    span: ctx.proc_span.clone(),
+                    proc_name: ctx.proc_name.to_owned(),
+                    message: "Microsoft x64 ABI violation: non-leaf procedure containing `call` must use `@proc_frame` for `.pdata`/`.xdata` SEH unwind".into(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn verify_proc_sequential_hazards(ctx: &ProcVerifyCtx<'_>) -> Result<(), ToolError> {
@@ -241,6 +292,21 @@ fn verify_proc_cfg_stack(
         return Ok(());
     }
 
+    let mut enter_alloc: i32 = 0;
+    for stmt in ctx.body {
+        if let Stmt::Instruction {
+            mnemonic, operands, ..
+        } = stmt
+            && mnemonic == "enter"
+        {
+            enter_alloc = operands
+                .first()
+                .and_then(|v| parse_signed_imm(v))
+                .unwrap_or(0);
+            break;
+        }
+    }
+
     let mut stack_at: Vec<Option<i32>> = vec![None; ctx.body.len()];
     let mut worklist: Vec<(usize, i32)> = vec![(0, 0)];
 
@@ -286,7 +352,7 @@ fn verify_proc_cfg_stack(
                 }
             }
             Stmt::Instruction { .. } => {
-                step_cfg_instruction(ctx, pc, depth, label_to_pc, &mut worklist)?;
+                step_cfg_instruction(ctx, pc, depth, enter_alloc, label_to_pc, &mut worklist)?;
             }
         }
     }
@@ -297,6 +363,7 @@ fn step_cfg_instruction(
     ctx: &ProcVerifyCtx<'_>,
     pc: usize,
     depth: i32,
+    enter_alloc: i32,
     label_to_pc: &BTreeMap<String, usize>,
     worklist: &mut Vec<(usize, i32)>,
 ) -> Result<(), ToolError> {
@@ -308,8 +375,46 @@ fn step_cfg_instruction(
     else {
         return Ok(());
     };
-    let delta = instruction_stack_delta(ctx.isa, mnemonic, operands);
+    let delta = if mnemonic == "leave" {
+        let slot: i32 = match ctx.isa {
+            CpuIsa::X86_8086 | CpuIsa::X86_286 => 2,
+            CpuIsa::Ia32 | CpuIsa::ArmV4 | CpuIsa::ArmV7 => 4,
+            CpuIsa::X86_64 | CpuIsa::Arm64 => 8,
+        };
+        slot + enter_alloc
+    } else {
+        instruction_stack_delta(ctx.isa, mnemonic, operands)
+    };
     let next_depth = depth + delta;
+
+    if matches!(ctx.isa, CpuIsa::ArmV4 | CpuIsa::ArmV7)
+        && matches!(mnemonic.as_str(), "bl" | "call_iat")
+        && depth % 8 != 0
+    {
+        return Err(ToolError::AbiLint {
+            span: span.clone(),
+            proc_name: ctx.proc_name.to_owned(),
+            message: format!(
+                "ARM32 ABI violation: SP offset ({depth}) is not 8-byte aligned before `{mnemonic}`"
+            ),
+        });
+    }
+    if ctx.isa == CpuIsa::Arm64 {
+        let uses_sp_mem = operands
+            .iter()
+            .any(|op| op.to_ascii_lowercase().contains("[sp"));
+        if (matches!(mnemonic.as_str(), "bl" | "blr" | "call_iat") && depth % 16 != 0)
+            || (uses_sp_mem && depth % 16 != 0 && next_depth % 16 != 0)
+        {
+            return Err(ToolError::AbiLint {
+                span: span.clone(),
+                proc_name: ctx.proc_name.to_owned(),
+                message: format!(
+                    "Windows ARM64 ABI violation: SP offset ({depth}) is not 16-byte aligned at `{mnemonic}`"
+                ),
+            });
+        }
+    }
 
     if is_return_mnemonic(mnemonic, operands) {
         if next_depth != 0 {
@@ -359,6 +464,12 @@ fn verify_proc_clobbers_and_abi(ctx: &ProcVerifyCtx<'_>) -> Result<(), ToolError
                             pushed_regs.insert(fam);
                         }
                     }
+                }
+            } else if mnemonic == "enter" {
+                pushed_regs.insert(canonical_reg_family(ctx.isa, "bp"));
+            } else if mnemonic == "pusha" {
+                for r in ["ax", "bx", "cx", "dx", "bp", "si", "di"] {
+                    pushed_regs.insert(canonical_reg_family(ctx.isa, r));
                 }
             } else if mnemonic == "stp" && operands.get(2).is_some_and(|m| m.contains("sp")) {
                 if let Some(r0) = operands.first() {
@@ -520,7 +631,19 @@ fn check_stmt_isa_purity(
                 }
             }
         }
-        CpuIsa::X86_286 | CpuIsa::X86_64 | CpuIsa::ArmV7 => {}
+        CpuIsa::ArmV7 => {
+            if m.starts_with("it")
+                && m.bytes().skip(2).all(|b| b == b't' || b == b'e')
+                && m.len() > 6
+            {
+                return Err(ToolError::OpcodePurity {
+                    span: span.clone(),
+                    isa,
+                    message: format!("Thumb-2 IT block `{m}` exceeds 4-instruction Windows ARMNT limit"),
+                });
+            }
+        }
+        CpuIsa::X86_286 | CpuIsa::X86_64 => {}
     }
 
     Ok(())
@@ -533,8 +656,24 @@ fn check_win16_selector_safety(
     span: &SourceSpan,
     tainted: &mut BTreeSet<String>,
 ) -> Result<(), ToolError> {
+    if !is_readonly_or_branch_mnemonic(mnemonic, operands)
+        && mnemonic != "call"
+        && let Some(dst) = operands.first()
+        && dst.to_ascii_lowercase().contains("cs:")
+    {
+        return Err(ToolError::AbiLint {
+            span: span.clone(),
+            proc_name: proc_name.to_owned(),
+            message: "Win16 Protected-Mode violation: writing to `CS:` code selector causes #GP"
+                .into(),
+        });
+    }
     if matches!(mnemonic, "add" | "sub" | "inc" | "dec" | "shl" | "shr") {
-        if let Some(dst) = operands.first() {
+        let is_ahincr_step = mnemonic == "add"
+            && operands
+                .get(1)
+                .is_some_and(|rhs| rhs.to_ascii_lowercase().contains("ahincr"));
+        if !is_ahincr_step && let Some(dst) = operands.first() {
             let r = canonical_reg_family(CpuIsa::X86_286, dst);
             if !r.is_empty() {
                 tainted.insert(r);
@@ -599,6 +738,13 @@ fn instruction_stack_delta(isa: CpuIsa, mnemonic: &str, operands: &[String]) -> 
         }
         "pusha" => -16,
         "popa" => 16,
+        "enter" => {
+            let locals = operands
+                .first()
+                .and_then(|v| parse_signed_imm(v))
+                .unwrap_or(0);
+            -slot - locals
+        }
         "int"
             if operands
                 .first()
@@ -606,22 +752,22 @@ fn instruction_stack_delta(isa: CpuIsa, mnemonic: &str, operands: &[String]) -> 
         {
             -2
         }
-        "sub"
+        "sub" | "subs"
             if operands
                 .first()
                 .is_some_and(|r| matches!(r.trim().to_ascii_lowercase().as_str(), "sp" | "esp" | "rsp")) =>
         {
             operands
-                .get(1)
+                .last()
                 .and_then(|v| parse_signed_imm(v))
                 .map_or(0, |n| -n)
         }
-        "add"
+        "add" | "adds"
             if operands
                 .first()
                 .is_some_and(|r| matches!(r.trim().to_ascii_lowercase().as_str(), "sp" | "esp" | "rsp")) =>
         {
-            operands.get(1).and_then(|v| parse_signed_imm(v)).unwrap_or(0)
+            operands.last().and_then(|v| parse_signed_imm(v)).unwrap_or(0)
         }
         "stp" if operands.last().is_some_and(|o| o.ends_with('!')) => {
             extract_arm64_sp_offset(operands.last().map_or("", String::as_str))
@@ -631,10 +777,27 @@ fn instruction_stack_delta(isa: CpuIsa, mnemonic: &str, operands: &[String]) -> 
         }
         "call" if isa == CpuIsa::Ia32 => operands
             .first()
-            .and_then(|op| op.rsplit_once('@'))
-            .and_then(|(_, rest)| {
-                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-                digits.parse::<i32>().ok()
+            .and_then(|op| {
+                op.rsplit_once('@')
+                    .or_else(|| op.rsplit_once("_p"))
+                    .and_then(|(_, rest)| {
+                        let digits: String =
+                            rest.chars().take_while(char::is_ascii_digit).collect();
+                        digits.parse::<i32>().ok()
+                    })
+            })
+            .unwrap_or(0),
+        "call" if matches!(isa, CpuIsa::X86_8086 | CpuIsa::X86_286) => operands
+            .first()
+            .and_then(|op| {
+                let lo = op.trim().to_ascii_lowercase();
+                if !lo.starts_with("far ") {
+                    return None;
+                }
+                lo.rsplit_once("_p").and_then(|(_, rest)| {
+                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                    digits.parse::<i32>().ok()
+                })
             })
             .unwrap_or(0),
         _ => 0,
@@ -847,16 +1010,49 @@ fn collect_call_clobbers(
     known_clobbers: &BTreeMap<String, BTreeSet<String>>,
     out: &mut BTreeSet<String>,
 ) {
-    if mnemonic == "bl" {
+    if matches!(mnemonic, "bl" | "blr" | "call_iat") {
         let lr = canonical_reg_family(isa, "lr");
         if !lr.is_empty() {
             out.insert(lr);
         }
     }
+    if mnemonic == "call_iat" {
+        if matches!(isa, CpuIsa::ArmV4 | CpuIsa::ArmV7) {
+            for scratch in ["r0", "r1", "r2", "r3", "r12", "lr"] {
+                out.insert(scratch.into());
+            }
+        } else if isa == CpuIsa::Arm64 {
+            for scratch in [
+                "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
+                "x13", "x14", "x15", "x16", "x17", "x30",
+            ] {
+                out.insert(scratch.into());
+            }
+        }
+        return;
+    }
+    if mnemonic == "blr" && isa == CpuIsa::Arm64 {
+        for scratch in [
+            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
+            "x13", "x14", "x15", "x16", "x17", "x30",
+        ] {
+            out.insert(scratch.into());
+        }
+        return;
+    }
     if let Some(callee) = operands.first() {
-        if let Some(cset) = known_clobbers.get(callee.trim()) {
+        let trimmed = callee.trim();
+        let lo = trimmed.to_ascii_lowercase();
+        if let Some(cset) = known_clobbers.get(trimmed) {
             for r in cset {
                 out.insert(r.clone());
+            }
+        } else if lo.starts_with("far ")
+            && lo.contains("_p")
+            && matches!(isa, CpuIsa::X86_8086 | CpuIsa::X86_286)
+        {
+            for scratch in ["ax", "bx", "cx", "dx", "es"] {
+                out.insert(scratch.into());
             }
         } else if callee.contains("__imp_") && isa == CpuIsa::X86_64 {
             for scratch in ["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"] {
@@ -900,7 +1096,13 @@ fn is_readonly_or_branch_mnemonic(mnemonic: &str, operands: &[String]) -> bool {
             | "cbnz"
             | "tbz"
             | "tbnz"
-    ) || conditional_branch_target(mnemonic, operands).is_some()
+            | "dmb"
+            | "dsb"
+            | "isb"
+            | "hint"
+    ) || (mnemonic.starts_with("it")
+        && mnemonic.bytes().skip(2).all(|b| b == b't' || b == b'e'))
+        || conditional_branch_target(mnemonic, operands).is_some()
 }
 
 fn collect_modified_regs(
@@ -920,8 +1122,34 @@ fn collect_modified_regs(
         return;
     }
 
-    if matches!(mnemonic, "call" | "bl") {
+    if matches!(mnemonic, "enter" | "leave" | "popa") {
+        let bp = canonical_reg_family(isa, "bp");
+        if !bp.is_empty() {
+            out.insert(bp);
+        }
+        if mnemonic == "popa" {
+            for r in ["ax", "bx", "cx", "dx", "si", "di"] {
+                let fam = canonical_reg_family(isa, r);
+                if !fam.is_empty() {
+                    out.insert(fam);
+                }
+            }
+        }
+        return;
+    }
+
+    if matches!(mnemonic, "call" | "bl" | "blr" | "call_iat" | "blx") {
+        if mnemonic == "blx" && matches!(isa, CpuIsa::ArmV4 | CpuIsa::ArmV7) {
+            for scratch in ["r0", "r1", "r2", "r3", "r12", "lr"] {
+                out.insert(scratch.into());
+            }
+            return;
+        }
         collect_call_clobbers(isa, mnemonic, operands, known_clobbers, out);
+        return;
+    }
+
+    if collect_arm_special_modified_regs(isa, mnemonic, operands, out) {
         return;
     }
 
@@ -945,43 +1173,7 @@ fn collect_modified_regs(
         return;
     }
 
-    if mnemonic.contains("movs") || mnemonic.contains("cmps") {
-        for r in ["si", "di"] {
-            let fam = canonical_reg_family(isa, r);
-            if !fam.is_empty() {
-                out.insert(fam);
-            }
-        }
-        if mnemonic.starts_with("rep") {
-            let c = canonical_reg_family(isa, "cx");
-            if !c.is_empty() {
-                out.insert(c);
-            }
-        }
-        return;
-    }
-
-    if mnemonic.contains("stos") || mnemonic.contains("scas") {
-        let di = canonical_reg_family(isa, "di");
-        if !di.is_empty() {
-            out.insert(di);
-        }
-        if mnemonic.starts_with("rep") {
-            let c = canonical_reg_family(isa, "cx");
-            if !c.is_empty() {
-                out.insert(c);
-            }
-        }
-        return;
-    }
-
-    if mnemonic.contains("lods") {
-        for r in ["ax", "si"] {
-            let fam = canonical_reg_family(isa, r);
-            if !fam.is_empty() {
-                out.insert(fam);
-            }
-        }
+    if collect_string_modified_regs(isa, mnemonic, out) {
         return;
     }
 
@@ -1013,6 +1205,88 @@ fn collect_modified_regs(
     }
 }
 
+fn collect_arm_special_modified_regs(
+    isa: CpuIsa,
+    mnemonic: &str,
+    operands: &[String],
+    out: &mut BTreeSet<String>,
+) -> bool {
+    if mnemonic == "pop"
+        && matches!(isa, CpuIsa::ArmV4 | CpuIsa::ArmV7)
+        && let Some(op0) = operands.first()
+    {
+        for part in op0.trim().trim_matches(&['{', '}'][..]).split(',') {
+            let fam = canonical_reg_family(isa, part);
+            if !fam.is_empty() {
+                out.insert(fam);
+            }
+        }
+        return true;
+    }
+    if matches!(mnemonic, "umull" | "smull" | "umlal" | "smlal") && operands.len() >= 2 {
+        for op in &operands[..2] {
+            let fam = canonical_reg_family(isa, op);
+            if !fam.is_empty() {
+                out.insert(fam);
+            }
+        }
+        return true;
+    }
+    if mnemonic == "mrc" && operands.len() >= 3 {
+        let fam = canonical_reg_family(isa, &operands[2]);
+        if !fam.is_empty() {
+            out.insert(fam);
+        }
+        return true;
+    }
+    false
+}
+
+fn collect_string_modified_regs(
+    isa: CpuIsa,
+    mnemonic: &str,
+    out: &mut BTreeSet<String>,
+) -> bool {
+    if (mnemonic.contains("movs") && !mnemonic.contains("movsx")) || mnemonic.contains("cmps") {
+        for r in ["si", "di"] {
+            let fam = canonical_reg_family(isa, r);
+            if !fam.is_empty() {
+                out.insert(fam);
+            }
+        }
+        if mnemonic.starts_with("rep") {
+            let c = canonical_reg_family(isa, "cx");
+            if !c.is_empty() {
+                out.insert(c);
+            }
+        }
+        return true;
+    }
+    if mnemonic.contains("stos") || mnemonic.contains("scas") {
+        let di = canonical_reg_family(isa, "di");
+        if !di.is_empty() {
+            out.insert(di);
+        }
+        if mnemonic.starts_with("rep") {
+            let c = canonical_reg_family(isa, "cx");
+            if !c.is_empty() {
+                out.insert(c);
+            }
+        }
+        return true;
+    }
+    if mnemonic.contains("lods") {
+        for r in ["ax", "si"] {
+            let fam = canonical_reg_family(isa, r);
+            if !fam.is_empty() {
+                out.insert(fam);
+            }
+        }
+        return true;
+    }
+    false
+}
+
 fn extract_code_payload(bytes: &[u8]) -> &[u8] {
     if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
         return bytes;
@@ -1024,6 +1298,33 @@ fn extract_code_payload(bytes: &[u8]) -> &[u8] {
         bytes[0x3F],
     ]))
     .unwrap_or(usize::MAX);
+    if lfanew.saturating_add(0x40) <= bytes.len() && &bytes[lfanew..lfanew + 2] == b"NE" {
+        let cseg = usize::from(u16::from_le_bytes([
+            bytes[lfanew + 0x1C],
+            bytes[lfanew + 0x1D],
+        ]));
+        let segtab = usize::from(u16::from_le_bytes([
+            bytes[lfanew + 0x22],
+            bytes[lfanew + 0x23],
+        ]));
+        let align_shift = {
+            let raw = u16::from_le_bytes([bytes[lfanew + 0x32], bytes[lfanew + 0x33]]);
+            u32::from(if raw == 0 { 9 } else { raw })
+        };
+        let s0 = lfanew.saturating_add(segtab);
+        if cseg >= 1 && s0.saturating_add(8) <= bytes.len() {
+            let sec_off = usize::from(u16::from_le_bytes([bytes[s0], bytes[s0 + 1]]));
+            let raw_len = usize::from(u16::from_le_bytes([bytes[s0 + 2], bytes[s0 + 3]]));
+            let byte_len = if raw_len == 0 { 65_536 } else { raw_len };
+            if let Some(file_off) = sec_off.checked_shl(align_shift)
+                && file_off > 0
+                && file_off.saturating_add(byte_len) <= bytes.len()
+            {
+                return &bytes[file_off..file_off + byte_len];
+            }
+        }
+        return bytes;
+    }
     if lfanew.saturating_add(24) > bytes.len() || &bytes[lfanew..lfanew + 4] != b"PE\0\0" {
         return bytes;
     }
@@ -1099,6 +1400,389 @@ const fn is_equiv_x86_mod11_pair(op1: u8, m1: u8, op2: u8, m2: u8) -> bool {
     dir_pair || comm_pair
 }
 
+const fn is_ia32_pe_image(raw: &[u8]) -> bool {
+    if raw.len() < 0x40 || raw[0] != b'M' || raw[1] != b'Z' {
+        return false;
+    }
+    let lfanew = u32::from_le_bytes([raw[0x3C], raw[0x3D], raw[0x3E], raw[0x3F]]) as usize;
+    if lfanew.saturating_add(6) > raw.len() {
+        return false;
+    }
+    raw[lfanew] == b'P'
+        && raw[lfanew + 1] == b'E'
+        && raw[lfanew + 2] == 0
+        && raw[lfanew + 3] == 0
+        && u16::from_le_bytes([raw[lfanew + 4], raw[lfanew + 5]]) == 0x014C
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Ia32NormInsn {
+    Branch { cond: u8, target_off: usize },
+    CallRel { target_off: usize },
+    PushOrMovTextVa { prefix_op: Vec<u8>, target_off: usize },
+    Bytes(Vec<u8>),
+}
+
+fn decode_ia32_modrm_len(bytes: &[u8], modrm_pos: usize) -> Option<(usize, Option<[u8; 2]>)> {
+    let modrm = *bytes.get(modrm_pos)?;
+    let md = modrm >> 6;
+    let reg = (modrm >> 3) & 7;
+    let rm = modrm & 7;
+    if md == 3 {
+        return Some((1, None));
+    }
+    let mut len = 1_usize;
+    let mut norm_ebp_sib: Option<[u8; 2]> = None;
+    if rm == 4 {
+        let sib = *bytes.get(modrm_pos + 1)?;
+        len += 1;
+        let scale = sib >> 6;
+        let idx = (sib >> 3) & 7;
+        let base = sib & 7;
+        if md == 0 && base == 5 {
+            len += 4;
+        } else if md == 0 && scale == 0 && idx == 5 && base != 4 && base != 5 {
+            // [reg + ebp] -> canonicalize to (reg, base_reg) pair
+            norm_ebp_sib = Some([reg, base]);
+        } else if md == 1
+            && scale == 0
+            && base == 5
+            && idx != 4
+            && idx != 5
+            && bytes.get(modrm_pos + 2) == Some(&0)
+        {
+            // [ebp + reg + 0] -> canonicalize to identical (reg, idx_reg) pair!
+            norm_ebp_sib = Some([reg, idx]);
+        }
+    }
+    if md == 1 {
+        len += 1;
+    } else if md == 2 || (md == 0 && rm == 5) {
+        len += 4;
+    }
+    if modrm_pos.saturating_add(len) <= bytes.len() {
+        Some((len, norm_ebp_sib))
+    } else {
+        None
+    }
+}
+
+fn decode_ia32_rel_ctrl(
+    bytes: &[u8],
+    pc: usize,
+    p: usize,
+    op: u8,
+) -> Option<(usize, Ia32NormInsn)> {
+    if (0x70..=0x7F).contains(&op) || op == 0xEB {
+        let d = (*bytes.get(p)?).cast_signed();
+        let end = p + 1;
+        let tgt = end.wrapping_add_signed(isize::from(d));
+        let cond = if op == 0xEB { 0xFF } else { op & 0x0F };
+        return Some((
+            end - pc,
+            Ia32NormInsn::Branch {
+                cond,
+                target_off: tgt,
+            },
+        ));
+    }
+    if op == 0xE9 || op == 0xE8 {
+        let d = i32::from_le_bytes([
+            *bytes.get(p)?,
+            *bytes.get(p + 1)?,
+            *bytes.get(p + 2)?,
+            *bytes.get(p + 3)?,
+        ]);
+        let end = p + 4;
+        let tgt = end.wrapping_add_signed(d as isize);
+        let insn = if op == 0xE9 {
+            Ia32NormInsn::Branch {
+                cond: 0xFF,
+                target_off: tgt,
+            }
+        } else {
+            Ia32NormInsn::CallRel { target_off: tgt }
+        };
+        return Some((end - pc, insn));
+    }
+    let d = (*bytes.get(p)?).cast_signed();
+    let end = p + 1;
+    let tgt = end.wrapping_add_signed(isize::from(d));
+    Some((
+        end - pc,
+        Ia32NormInsn::Branch {
+            cond: op,
+            target_off: tgt,
+        },
+    ))
+}
+
+fn decode_ia32_insn(bytes: &[u8], pc: usize) -> Option<(usize, Ia32NormInsn)> {
+    let mut p = pc;
+    let mut has_66 = false;
+    while p < bytes.len() {
+        let b = bytes[p];
+        if b == 0x66 {
+            has_66 = true;
+            p += 1;
+        } else if matches!(
+            b,
+            0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x67 | 0xF0 | 0xF2 | 0xF3
+        ) {
+            p += 1;
+        } else {
+            break;
+        }
+    }
+    let op = *bytes.get(p)?;
+    let mut sorted_prefixes = bytes[pc..p].to_vec();
+    sorted_prefixes.sort_unstable();
+    let imm_word = if has_66 { 2_usize } else { 4_usize };
+    p += 1;
+
+    if op == 0x0F {
+        let op2 = *bytes.get(p)?;
+        p += 1;
+        if (0x80..=0x8F).contains(&op2) {
+            let d = i32::from_le_bytes([
+                *bytes.get(p)?,
+                *bytes.get(p + 1)?,
+                *bytes.get(p + 2)?,
+                *bytes.get(p + 3)?,
+            ]);
+            let end = p + 4;
+            let tgt = end.wrapping_add_signed(d as isize);
+            return Some((
+                end - pc,
+                Ia32NormInsn::Branch {
+                    cond: op2 & 0x0F,
+                    target_off: tgt,
+                },
+            ));
+        }
+        let (mlen, ebp_pair) = decode_ia32_modrm_len(bytes, p)?;
+        let extra = usize::from(op2 == 0xBA);
+        let end = p + mlen + extra;
+        if end > bytes.len() {
+            return None;
+        }
+        let mut raw = sorted_prefixes;
+        raw.extend_from_slice(&[op, op2]);
+        if let Some([r, idx]) = ebp_pair {
+            raw.extend_from_slice(&[0x04 | (r << 3), (5 << 3) | idx]);
+        } else {
+            raw.extend_from_slice(&bytes[p..p + mlen]);
+        }
+        raw.extend_from_slice(&bytes[p + mlen..end]);
+        return Some((end - pc, Ia32NormInsn::Bytes(raw)));
+    }
+
+    if matches!(op, 0x70..=0x7F | 0xE0..=0xE3 | 0xE8 | 0xE9 | 0xEB) {
+        return decode_ia32_rel_ctrl(bytes, pc, p, op);
+    }
+
+    decode_ia32_fixed_or_modrm(bytes, pc, p, op, imm_word, sorted_prefixes)
+}
+
+fn decode_ia32_fixed_or_modrm(
+    bytes: &[u8],
+    pc: usize,
+    p: usize,
+    op: u8,
+    imm_word: usize,
+    sorted_prefixes: Vec<u8>,
+) -> Option<(usize, Ia32NormInsn)> {
+    let fixed_extra: Option<usize> = match op {
+        0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x27 | 0x2F | 0x37 | 0x3F
+        | 0x40..=0x5F | 0x60 | 0x61 | 0x90..=0x99 | 0x9B..=0x9F | 0xA4..=0xA7 | 0xAA..=0xAF
+        | 0xC3 | 0xCB | 0xCC | 0xCE | 0xCF | 0xD7 | 0xF4 | 0xF5 | 0xF8..=0xFD => Some(0),
+        0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C | 0x6A | 0xA8 | 0xB0..=0xB7
+        | 0xCD | 0xD4 | 0xD5 | 0xE4..=0xE7 => Some(1),
+        0xC2 | 0xCA => Some(2),
+        0xC8 => Some(3),
+        0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D | 0x68 | 0xA9 | 0xB8..=0xBF => {
+            Some(imm_word)
+        }
+        0xA0..=0xA3 => Some(4),
+        _ => None,
+    };
+    if let Some(ex) = fixed_extra {
+        let end = p + ex;
+        if end > bytes.len() {
+            return None;
+        }
+        if ex == 4 && (op == 0x68 || (0xB8..=0xBF).contains(&op)) {
+            let imm = u32::from_le_bytes([
+                bytes[p],
+                bytes[p + 1],
+                bytes[p + 2],
+                bytes[p + 3],
+            ]) as usize;
+            if imm >= 0x0040_1000 && imm < 0x0040_1000_usize.saturating_add(bytes.len()) {
+                let mut pop = sorted_prefixes;
+                pop.push(op);
+                return Some((
+                    end - pc,
+                    Ia32NormInsn::PushOrMovTextVa {
+                        prefix_op: pop,
+                        target_off: imm - 0x0040_1000,
+                    },
+                ));
+            }
+        }
+        let mut raw = sorted_prefixes;
+        raw.push(op);
+        raw.extend_from_slice(&bytes[p..end]);
+        return Some((end - pc, Ia32NormInsn::Bytes(raw)));
+    }
+
+    let modrm_byte = *bytes.get(p)?;
+    let reg_fld = (modrm_byte >> 3) & 7;
+    let (mlen, ebp_pair) = decode_ia32_modrm_len(bytes, p)?;
+    let imm_extra = match op {
+        0x69 | 0x81 | 0xC7 => imm_word,
+        0xF7 if reg_fld <= 1 => imm_word,
+        0x6B | 0x80 | 0x82 | 0x83 | 0xC0 | 0xC1 | 0xC6 => 1,
+        0xF6 if reg_fld <= 1 => 1,
+        _ => 0,
+    };
+    let end = p + mlen + imm_extra;
+    if end > bytes.len() {
+        return None;
+    }
+    let mut raw = sorted_prefixes;
+    raw.push(op);
+    if let Some([r, idx]) = ebp_pair {
+        raw.extend_from_slice(&[0x04 | (r << 3), (5 << 3) | idx]);
+    } else {
+        raw.extend_from_slice(&bytes[p..p + mlen]);
+    }
+    raw.extend_from_slice(&bytes[p + mlen..end]);
+    Some((end - pc, Ia32NormInsn::Bytes(raw)))
+}
+
+fn same_target_idx(
+    base_map: &std::collections::HashMap<usize, usize>,
+    base_off: usize,
+    other_map: &std::collections::HashMap<usize, usize>,
+    other_off: usize,
+) -> bool {
+    matches!(
+        (base_map.get(&base_off), other_map.get(&other_off)),
+        (Some(idx_a), Some(idx_b)) if idx_a == idx_b
+    )
+}
+
+fn decode_ia32_stream(bytes: &[u8]) -> Option<(Vec<Ia32NormInsn>, std::collections::HashMap<usize, usize>)> {
+    let trimmed_end = bytes
+        .iter()
+        .rposition(|&b| b != 0)
+        .map_or(0, |idx| idx + 1);
+    let mut insns = Vec::new();
+    let mut off_to_idx = std::collections::HashMap::new();
+    let mut pc = 0_usize;
+    while pc < trimmed_end {
+        let idx = insns.len();
+        off_to_idx.insert(pc, idx);
+        let (len, insn) = decode_ia32_insn(&bytes[..trimmed_end], pc)?;
+        insns.push(insn);
+        pc += len;
+    }
+    off_to_idx.insert(trimmed_end, insns.len());
+    Some((insns, off_to_idx))
+}
+
+fn verify_ia32_stream_equiv(
+    artifact: &str,
+    base_name: &str,
+    base_bytes: &[u8],
+    other_name: &str,
+    other_bytes: &[u8],
+) -> Result<(), ToolError> {
+    let Some((b_insns, b_map)) = decode_ia32_stream(base_bytes) else {
+        return Err(ToolError::Equivalence {
+            artifact: artifact.to_owned(),
+            offset: 0,
+            details: format!("failed to decode IA-32 instruction stream for {base_name}"),
+        });
+    };
+    let Some((o_insns, o_map)) = decode_ia32_stream(other_bytes) else {
+        return Err(ToolError::Equivalence {
+            artifact: artifact.to_owned(),
+            offset: 0,
+            details: format!("failed to decode IA-32 instruction stream for {other_name}"),
+        });
+    };
+    if b_insns.len() != o_insns.len() {
+        return Err(ToolError::Equivalence {
+            artifact: artifact.to_owned(),
+            offset: b_insns.len().min(o_insns.len()),
+            details: format!(
+                "IA-32 instruction count mismatch: {base_name}={} insns vs {other_name}={} insns",
+                b_insns.len(),
+                o_insns.len()
+            ),
+        });
+    }
+    for (idx, (bi, oi)) in b_insns.iter().zip(o_insns.iter()).enumerate() {
+        let ok = match (bi, oi) {
+            (
+                Ia32NormInsn::Branch {
+                    cond: c1,
+                    target_off: t1,
+                },
+                Ia32NormInsn::Branch {
+                    cond: c2,
+                    target_off: t2,
+                },
+            ) => c1 == c2 && same_target_idx(&b_map, *t1, &o_map, *t2),
+            (Ia32NormInsn::CallRel { target_off: t1 }, Ia32NormInsn::CallRel { target_off: t2 }) => {
+                same_target_idx(&b_map, *t1, &o_map, *t2)
+            }
+            (
+                Ia32NormInsn::PushOrMovTextVa {
+                    prefix_op: p1,
+                    target_off: t1,
+                },
+                Ia32NormInsn::PushOrMovTextVa {
+                    prefix_op: p2,
+                    target_off: t2,
+                },
+            ) => p1 == p2 && same_target_idx(&b_map, *t1, &o_map, *t2),
+            (Ia32NormInsn::Bytes(v1), Ia32NormInsn::Bytes(v2)) => {
+                let (s1, s2) = if v1.first() == Some(&0x66) && v2.first() == Some(&0x66) {
+                    (&v1[1..], &v2[1..])
+                } else {
+                    (&v1[..], &v2[..])
+                };
+                v1 == v2
+                    || (s1.len() == 2
+                        && s2.len() == 2
+                        && is_equiv_x86_mod11_pair(s1[0], s1[1], s2[0], s2[1]))
+                    || (s1.len() >= 3
+                        && s1.len() == s2.len()
+                        && s1[0] == s2[0]
+                        && s1[1] == s2[1]
+                        && (s1[1] & 0x07) == 0x04
+                        && (s1[1] & 0xC0) != 0xC0
+                        && is_equiv_x86_sib_scale1(s1[2], s2[2])
+                        && s1[3..] == s2[3..])
+            }
+            _ => false,
+        };
+        if !ok {
+            return Err(ToolError::Equivalence {
+                artifact: artifact.to_owned(),
+                offset: idx,
+                details: format!(
+                    "instruction #{idx} mismatch: {base_name}={bi:?} vs {other_name}={oi:?}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Verifies that multiple assembled binary artifacts (e.g. `NASM` vs `FASM` vs `JWasm`)
 /// have normalized instruction-stream equivalence across `.COM`, `NE`, `PE32`, and `PE32+`.
 ///
@@ -1115,6 +1799,20 @@ pub fn verify_binary_equivalence(
     let base_bytes = extract_code_payload(raw_base);
     for &(other_name, raw_other) in &outputs[1..] {
         let other_bytes = extract_code_payload(raw_other);
+        if is_ia32_pe_image(raw_base) && is_ia32_pe_image(raw_other) {
+            verify_ia32_stream_equiv(artifact, base_name, base_bytes, other_name, other_bytes)?;
+            continue;
+        }
+        if x64_equiv::is_x64_pe_image(raw_base) && x64_equiv::is_x64_pe_image(raw_other) {
+            x64_equiv::verify_x64_stream_equiv(
+                artifact,
+                base_name,
+                base_bytes,
+                other_name,
+                other_bytes,
+            )?;
+            continue;
+        }
         if base_bytes.len() != other_bytes.len() {
             return Err(ToolError::Equivalence {
                 artifact: artifact.to_owned(),
@@ -1237,18 +1935,252 @@ fn check_pe_purity(file_label: &str, isa: CpuIsa, bytes: &[u8]) -> Result<(), To
             message: format!("PE Machine 0x{machine:04X} does not match target ISA `{isa}`"),
         });
     }
-    if isa == CpuIsa::X86_64 && lfanew + 24 + 144 <= bytes.len() {
-        let pdata_rva = u32::from_le_bytes([
-            bytes[lfanew + 24 + 136],
-            bytes[lfanew + 24 + 137],
-            bytes[lfanew + 24 + 138],
-            bytes[lfanew + 24 + 139],
+    if isa == CpuIsa::Ia32 && lfanew + 24 + 184 <= bytes.len() {
+        let opt = lfanew + 24;
+        let subsys_maj = u16::from_le_bytes([bytes[opt + 48], bytes[opt + 49]]);
+        let subsys_min = u16::from_le_bytes([bytes[opt + 50], bytes[opt + 51]]);
+        let subsys = u16::from_le_bytes([bytes[opt + 68], bytes[opt + 69]]);
+        let dll_chars = u16::from_le_bytes([bytes[opt + 70], bytes[opt + 71]]);
+        let load_cfg_rva = u32::from_le_bytes([
+            bytes[opt + 176],
+            bytes[opt + 177],
+            bytes[opt + 178],
+            bytes[opt + 179],
         ]);
-        if pdata_rva == 0 {
+        if subsys != 3 || subsys_maj != 3 || subsys_min != 10 {
             return Err(ToolError::AbiLint {
                 span: SourceSpan::new(file_label, 1, 1),
-                proc_name: "<pe64>".into(),
-                message: "x86-64 PE32+ binary is missing mandatory .pdata exception directory".into(),
+                proc_name: "<pe32>".into(),
+                message: format!(
+                    "IA-32 PE32 must target CUI (3) Subsystem 3.10 for NT 3.1..11 & Win95..Me (got subsys={subsys}, ver={subsys_maj}.{subsys_min:02})"
+                ),
+            });
+        }
+        if (dll_chars & 0x0140) != 0x0140 {
+            return Err(ToolError::AbiLint {
+                span: SourceSpan::new(file_label, 1, 1),
+                proc_name: "<pe32>".into(),
+                message: format!(
+                    "IA-32 PE32 must enable DYNAMIC_BASE (0x0040) and NX_COMPAT (0x0100) DllCharacteristics (got 0x{dll_chars:04X})"
+                ),
+            });
+        }
+        if load_cfg_rva == 0 {
+            return Err(ToolError::AbiLint {
+                span: SourceSpan::new(file_label, 1, 1),
+                proc_name: "<pe32>".into(),
+                message: "IA-32 PE32 is missing mandatory /SAFESEH LOAD_CONFIG directory".into(),
+            });
+        }
+    }
+    if isa == CpuIsa::X86_64 && lfanew + 24 + 200 <= bytes.len() {
+        check_pe64_purity(file_label, bytes, lfanew + 24)?;
+    }
+    if matches!(isa, CpuIsa::ArmV4 | CpuIsa::ArmV7) && lfanew + 24 + 184 <= bytes.len() {
+        check_arm32_pe_purity(file_label, isa, bytes, lfanew + 24)?;
+    }
+    if isa == CpuIsa::Arm64 && lfanew + 24 + 200 <= bytes.len() {
+        check_arm64_pe_purity(file_label, bytes, lfanew + 24)?;
+    }
+    Ok(())
+}
+
+fn check_arm32_pe_purity(
+    file_label: &str,
+    isa: CpuIsa,
+    bytes: &[u8],
+    opt: usize,
+) -> Result<(), ToolError> {
+    let subsys_maj = u16::from_le_bytes([bytes[opt + 48], bytes[opt + 49]]);
+    let subsys_min = u16::from_le_bytes([bytes[opt + 50], bytes[opt + 51]]);
+    let subsys = u16::from_le_bytes([bytes[opt + 68], bytes[opt + 69]]);
+    let dll_chars = u16::from_le_bytes([bytes[opt + 70], bytes[opt + 71]]);
+    let rsrc_rva = u32::from_le_bytes([bytes[opt + 112], bytes[opt + 113], bytes[opt + 114], bytes[opt + 115]]);
+    let pdata_rva = u32::from_le_bytes([bytes[opt + 120], bytes[opt + 121], bytes[opt + 122], bytes[opt + 123]]);
+    let lcfg_rva = u32::from_le_bytes([bytes[opt + 176], bytes[opt + 177], bytes[opt + 178], bytes[opt + 179]]);
+
+    if isa == CpuIsa::ArmV4 {
+        if !matches!(subsys, 9 | 3) || subsys_maj != 4 || pdata_rva == 0 {
+            return Err(ToolError::AbiLint {
+                span: SourceSpan::new(file_label, 1, 1),
+                proc_name: "<armv4_pe>".into(),
+                message: format!(
+                    "ARMv4 PE32 must target WinCE Subsystem 9 (or CUI 3) 4.0 with .pdata (got subsys={subsys}, ver={subsys_maj}.{subsys_min:02}, pdata=0x{pdata_rva:X})"
+                ),
+            });
+        }
+    } else {
+        if subsys != 3 || subsys_maj != 6 || subsys_min != 2 {
+            return Err(ToolError::AbiLint {
+                span: SourceSpan::new(file_label, 1, 1),
+                proc_name: "<armnt_pe>".into(),
+                message: format!(
+                    "ARMv7 ARMNT PE32 must target CUI (3) Subsystem 6.02 for Windows RT 8.0..Win10 ARM32 (got subsys={subsys}, ver={subsys_maj}.{subsys_min:02})"
+                ),
+            });
+        }
+        if (dll_chars & 0x4140) != 0x4140 || pdata_rva == 0 || rsrc_rva == 0 || lcfg_rva == 0 {
+            return Err(ToolError::AbiLint {
+                span: SourceSpan::new(file_label, 1, 1),
+                proc_name: "<armnt_pe>".into(),
+                message: format!(
+                    "ARMv7 ARMNT PE32 requires DYNAMIC_BASE|NX_COMPAT|GUARD_CF (0x4140) + .pdata + .rsrc + LOAD_CONFIG (dll=0x{dll_chars:04X}, pdata=0x{pdata_rva:X}, rsrc=0x{rsrc_rva:X}, lcfg=0x{lcfg_rva:X})"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_arm64_pe_purity(file_label: &str, bytes: &[u8], opt: usize) -> Result<(), ToolError> {
+    let subsys_maj = u16::from_le_bytes([bytes[opt + 48], bytes[opt + 49]]);
+    let subsys_min = u16::from_le_bytes([bytes[opt + 50], bytes[opt + 51]]);
+    let subsys = u16::from_le_bytes([bytes[opt + 68], bytes[opt + 69]]);
+    let dll_chars = u16::from_le_bytes([bytes[opt + 70], bytes[opt + 71]]);
+    let rsrc_rva = u32::from_le_bytes([bytes[opt + 128], bytes[opt + 129], bytes[opt + 130], bytes[opt + 131]]);
+    let pdata_rva = u32::from_le_bytes([bytes[opt + 136], bytes[opt + 137], bytes[opt + 138], bytes[opt + 139]]);
+    let lcfg_rva = u32::from_le_bytes([bytes[opt + 192], bytes[opt + 193], bytes[opt + 194], bytes[opt + 195]]);
+    if subsys != 3 || subsys_maj != 10 || subsys_min != 0 {
+        return Err(ToolError::AbiLint {
+            span: SourceSpan::new(file_label, 1, 1),
+            proc_name: "<arm64_pe>".into(),
+            message: format!(
+                "ARM64 PE32+ must target CUI (3) Subsystem 10.00 for Windows 10/11 on ARM (got subsys={subsys}, ver={subsys_maj}.{subsys_min:02})"
+            ),
+        });
+    }
+    if (dll_chars & 0x0140) != 0x0140 || pdata_rva == 0 || rsrc_rva == 0 || lcfg_rva == 0 {
+        return Err(ToolError::AbiLint {
+            span: SourceSpan::new(file_label, 1, 1),
+            proc_name: "<arm64_pe>".into(),
+            message: format!(
+                "ARM64 PE32+ requires DYNAMIC_BASE|NX_COMPAT (0x0140) + .pdata + .rsrc + LOAD_CONFIG (dll=0x{dll_chars:04X}, pdata=0x{pdata_rva:X}, rsrc=0x{rsrc_rva:X}, lcfg=0x{lcfg_rva:X})"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn check_pe64_purity(file_label: &str, bytes: &[u8], opt: usize) -> Result<(), ToolError> {
+    let subsys_maj = u16::from_le_bytes([bytes[opt + 48], bytes[opt + 49]]);
+    let subsys_min = u16::from_le_bytes([bytes[opt + 50], bytes[opt + 51]]);
+    let subsys = u16::from_le_bytes([bytes[opt + 68], bytes[opt + 69]]);
+    let dll_chars = u16::from_le_bytes([bytes[opt + 70], bytes[opt + 71]]);
+    let rsrc_rva = u32::from_le_bytes([bytes[opt + 128], bytes[opt + 129], bytes[opt + 130], bytes[opt + 131]]);
+    let pdata_rva = u32::from_le_bytes([bytes[opt + 136], bytes[opt + 137], bytes[opt + 138], bytes[opt + 139]]);
+    let lcfg_rva = u32::from_le_bytes([bytes[opt + 192], bytes[opt + 193], bytes[opt + 194], bytes[opt + 195]]);
+    if subsys != 3 || subsys_maj != 5 || subsys_min != 2 {
+        return Err(ToolError::AbiLint {
+            span: SourceSpan::new(file_label, 1, 1),
+            proc_name: "<pe64>".into(),
+            message: format!(
+                "x86-64 PE32+ must target CUI (3) Subsystem 5.02 for XP Pro x64..11 (got subsys={subsys}, ver={subsys_maj}.{subsys_min:02})"
+            ),
+        });
+    }
+    if (dll_chars & 0x0140) != 0x0140 {
+        return Err(ToolError::AbiLint {
+            span: SourceSpan::new(file_label, 1, 1),
+            proc_name: "<pe64>".into(),
+            message: format!(
+                "x86-64 PE32+ must enable DYNAMIC_BASE (0x0040) and NX_COMPAT (0x0100) DllCharacteristics (got 0x{dll_chars:04X})"
+            ),
+        });
+    }
+    if pdata_rva == 0 || rsrc_rva == 0 || lcfg_rva == 0 {
+        return Err(ToolError::AbiLint {
+            span: SourceSpan::new(file_label, 1, 1),
+            proc_name: "<pe64>".into(),
+            message: format!(
+                "x86-64 PE32+ missing mandatory directories (pdata=0x{pdata_rva:X}, rsrc=0x{rsrc_rva:X}, load_config=0x{lcfg_rva:X})"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn check_ne_purity(file_label: &str, isa: CpuIsa, bytes: &[u8]) -> Result<(), ToolError> {
+    if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+        return Ok(());
+    }
+    let lfanew = usize::try_from(u32::from_le_bytes([
+        bytes[0x3C],
+        bytes[0x3D],
+        bytes[0x3E],
+        bytes[0x3F],
+    ]))
+    .unwrap_or(usize::MAX);
+    if lfanew.saturating_add(0x40) > bytes.len() || &bytes[lfanew..lfanew + 2] != b"NE" {
+        return Ok(());
+    }
+    let ne_flags = u16::from_le_bytes([bytes[lfanew + 0x0C], bytes[lfanew + 0x0D]]);
+    let ne_heap = u16::from_le_bytes([bytes[lfanew + 0x10], bytes[lfanew + 0x11]]);
+    let ne_stack = u16::from_le_bytes([bytes[lfanew + 0x12], bytes[lfanew + 0x13]]);
+    let ne_cseg = usize::from(u16::from_le_bytes([
+        bytes[lfanew + 0x1C],
+        bytes[lfanew + 0x1D],
+    ]));
+    let ne_segtab = usize::from(u16::from_le_bytes([
+        bytes[lfanew + 0x22],
+        bytes[lfanew + 0x23],
+    ]));
+    let ne_flagsothers = bytes[lfanew + 0x37];
+    let ne_expver = u16::from_le_bytes([bytes[lfanew + 0x3E], bytes[lfanew + 0x3F]]);
+
+    if ne_cseg < 2 || ne_heap < 0x1000 || ne_stack < 0x1000 {
+        return Err(ToolError::AbiLint {
+            span: SourceSpan::new(file_label, 1, 1),
+            proc_name: "<ne16>".into(),
+            message: "Win16 NE binary must define code + DGROUP segments with valid heap/stack"
+                .into(),
+        });
+    }
+    match isa {
+        CpuIsa::X86_8086 => {
+            if (ne_flags & 0x0008) != 0 || (ne_flagsothers & 0x02) != 0 {
+                return Err(ToolError::OpcodePurity {
+                    span: SourceSpan::new(file_label, 1, 1),
+                    isa,
+                    message: "8086 universal NE binary must not set 286/PROTMODE-only header flags"
+                        .into(),
+                });
+            }
+        }
+        CpuIsa::X86_286 => {
+            if (ne_flags & 0x0008) == 0 || (ne_flagsothers & 0x02) == 0 || ne_expver < 0x0300 {
+                return Err(ToolError::OpcodePurity {
+                    span: SourceSpan::new(file_label, 1, 1),
+                    isa,
+                    message:
+                        "80286 Protected-Mode NE binary must set PROTMODE (0x0008), 286 CPU flag (0x02), and expver >= 3.00"
+                            .into(),
+                });
+            }
+            let seg_base = lfanew.saturating_add(ne_segtab);
+            let mut has_discardable = false;
+            for idx in 0..ne_cseg {
+                let off = seg_base + idx * 8;
+                if off + 8 <= bytes.len() {
+                    let sflags = u16::from_le_bytes([bytes[off + 4], bytes[off + 5]]);
+                    if (sflags & 0x1001) == 0x1000 {
+                        has_discardable = true;
+                    }
+                }
+            }
+            if !has_discardable && ne_cseg >= 3 {
+                return Err(ToolError::AbiLint {
+                    span: SourceSpan::new(file_label, 1, 1),
+                    proc_name: "<ne286>".into(),
+                    message: "multi-code-segment WINCMD286.EXE must mark transient segment DISCARDABLE"
+                        .into(),
+                });
+            }
+        }
+        _ => {
+            return Err(ToolError::OpcodePurity {
+                span: SourceSpan::new(file_label, 1, 1),
+                isa,
+                message: format!("Win16 NE binary incompatible with ISA `{isa}`"),
             });
         }
     }
@@ -1267,6 +2199,7 @@ pub fn verify_binary_purity(
     bytes: &[u8],
 ) -> Result<(), ToolError> {
     check_pe_purity(file_label, isa, bytes)?;
+    check_ne_purity(file_label, isa, bytes)?;
     let code = extract_code_payload(bytes);
     if isa == CpuIsa::ArmV4 {
         for (idx, chunk) in code.as_chunks::<4>().0.iter().enumerate() {
@@ -1355,7 +2288,17 @@ pub fn lint_directory(dir: &Path) -> Result<usize, ToolError> {
     for m in &modules {
         let scoped: Vec<CanonicalModule> = modules
             .iter()
-            .filter(|other| other.cpu.is_none() || m.cpu.is_none() || other.cpu == m.cpu)
+            .filter(|other| {
+                other.cpu.is_none()
+                    || m.cpu.is_none()
+                    || other.cpu == m.cpu
+                    || (m.cpu == Some(CpuIsa::X86_286)
+                        && other.format == BinaryFormat::Include
+                        && other.cpu == Some(CpuIsa::X86_8086))
+                    || (m.cpu == Some(CpuIsa::ArmV7)
+                        && other.format == BinaryFormat::Include
+                        && other.cpu == Some(CpuIsa::ArmV4))
+            })
             .cloned()
             .collect();
         let clobbers = collect_module_clobbers(&scoped);
@@ -1571,7 +2514,7 @@ mod tests {
 ;; @err none
 ;; @clobbers rax, rcx, rdx, r8, r9, r10, r11, r12
 ;; @desc Calls Win64 IAT and saves rbx/r12.
-@proc_frame w64_fn, 32, rbx, r12
+@proc_frame w64_fn, 40, rbx, r12
     mov rbx, 1
     mov r12d, 2
     call qword [rel __imp_GetVersion]
@@ -1863,13 +2806,44 @@ ret
         pe[sec_off + 20..sec_off + 24].copy_from_slice(&400_u32.to_le_bytes());
         pe[400..404].copy_from_slice(&[0x48, 0x31, 0xC0, 0xC3]);
 
-        // Missing .pdata on x64 fails
+        // Missing Subsystem 5.02 / DYNAMIC_BASE|NX_COMPAT / .pdata / .rsrc / LOAD_CONFIG on x64 fails
         assert!(verify_binary_purity("bad64.exe", CpuIsa::X86_64, &pe).is_err());
-        // Populate .pdata RVA in OptHdr64 (+136)
+        pe[0x80 + 24 + 48..0x80 + 24 + 50].copy_from_slice(&5_u16.to_le_bytes());
+        pe[0x80 + 24 + 50..0x80 + 24 + 52].copy_from_slice(&2_u16.to_le_bytes());
+        pe[0x80 + 24 + 68..0x80 + 24 + 70].copy_from_slice(&3_u16.to_le_bytes());
+        assert!(verify_binary_purity("bad64_nx.exe", CpuIsa::X86_64, &pe).is_err());
+        pe[0x80 + 24 + 70..0x80 + 24 + 72].copy_from_slice(&0x0140_u16.to_le_bytes());
+        assert!(verify_binary_purity("bad64_dirs.exe", CpuIsa::X86_64, &pe).is_err());
+        pe[0x80 + 24 + 128..0x80 + 24 + 132].copy_from_slice(&0x3000_u32.to_le_bytes());
         pe[0x80 + 24 + 136..0x80 + 24 + 140].copy_from_slice(&0x2000_u32.to_le_bytes());
+        pe[0x80 + 24 + 192..0x80 + 24 + 196].copy_from_slice(&0x4000_u32.to_le_bytes());
         verify_binary_purity("ok64.exe", CpuIsa::X86_64, &pe)?;
         // Wrong ISA Machine fails
         assert!(verify_binary_purity("wrong.exe", CpuIsa::Ia32, &pe).is_err());
+
+        // Synthetic minimal IA-32 PE32 image verifying Subsystem 3.10, DYNAMIC_BASE|NX_COMPAT, and /SAFESEH LoadConfig
+        let mut pe32 = vec![0_u8; 512];
+        pe32[0..2].copy_from_slice(b"MZ");
+        pe32[0x3C..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
+        pe32[0x80..0x84].copy_from_slice(b"PE\0\0");
+        pe32[0x84..0x86].copy_from_slice(&0x014C_u16.to_le_bytes()); // I386
+        pe32[0x86..0x88].copy_from_slice(&1_u16.to_le_bytes());
+        pe32[0x94..0x96].copy_from_slice(&224_u16.to_le_bytes()); // OptHdr32 size
+        let sec32 = 0x80 + 24 + 224;
+        pe32[sec32..sec32 + 5].copy_from_slice(b".text");
+        pe32[sec32 + 8..sec32 + 12].copy_from_slice(&4_u32.to_le_bytes());
+        pe32[sec32 + 16..sec32 + 20].copy_from_slice(&4_u32.to_le_bytes());
+        pe32[sec32 + 20..sec32 + 24].copy_from_slice(&400_u32.to_le_bytes());
+        pe32[400..404].copy_from_slice(&[0x31, 0xC0, 0xC3, 0x90]);
+        assert!(verify_binary_purity("bad_subsys32.exe", CpuIsa::Ia32, &pe32).is_err());
+        pe32[0x80 + 24 + 48..0x80 + 24 + 50].copy_from_slice(&3_u16.to_le_bytes());
+        pe32[0x80 + 24 + 50..0x80 + 24 + 52].copy_from_slice(&10_u16.to_le_bytes());
+        pe32[0x80 + 24 + 68..0x80 + 24 + 70].copy_from_slice(&3_u16.to_le_bytes());
+        assert!(verify_binary_purity("bad_dllchars32.exe", CpuIsa::Ia32, &pe32).is_err());
+        pe32[0x80 + 24 + 70..0x80 + 24 + 72].copy_from_slice(&0x0140_u16.to_le_bytes());
+        assert!(verify_binary_purity("bad_safeseh32.exe", CpuIsa::Ia32, &pe32).is_err());
+        pe32[0x80 + 24 + 176..0x80 + 24 + 180].copy_from_slice(&0x2000_u32.to_le_bytes());
+        verify_binary_purity("ok32.exe", CpuIsa::Ia32, &pe32)?;
 
         // Forbidden CRT import fails
         let mut crt_bin = pe.clone();

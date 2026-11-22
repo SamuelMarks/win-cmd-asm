@@ -9,8 +9,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use wincmd_diag::{ErrCode, ToolError};
 
+pub mod arm32_pe;
 pub mod dos_syscalls;
-use dos_syscalls::{CON_IN_SENTINEL, CON_OUT_SENTINEL, LfnSearchState, VfsMeta};
+pub mod win16_ne;
+pub mod win_mock;
+use dos_syscalls::{CON_IN_SENTINEL, CON_OUT_SENTINEL, LfnSearchState, NUL_SENTINEL, VfsMeta};
+pub use win16_ne::{Win16Era, Win16State};
 
 /// Total simulated 8086 Real-Mode + HMA address space (`1 MiB + 64 KiB`).
 pub const MEM_SIZE: usize = 1_114_112;
@@ -183,6 +187,12 @@ pub(crate) struct SavedExecFrame {
     pub(crate) dta: (u16, u16),
 }
 
+/// Matched 8.3 FCB directory entry `(name8, ext3, attr, size)`.
+pub(crate) type FcbSearchHit = ([u8; 8], [u8; 3], u8, u32);
+
+/// Per-DTA `AH=4Eh/4Fh` search result list `(matches, next_index)` keyed by `(seg, off)`.
+pub(crate) type DtaSearchState = (Vec<(String, u8, u32)>, usize);
+
 /// Deterministic 8086 CPU + MS-DOS virtual machine with instruction/branch coverage tracking.
 #[allow(clippy::struct_excessive_bools)]
 pub struct DosVm {
@@ -221,10 +231,9 @@ pub struct DosVm {
     handles: BTreeMap<u16, OpenFile>,
     /// Peak concurrent non-standard open handles (`>= 5`) observed during execution.
     pub max_concurrent_handles: usize,
-    pub(crate) fcb_search: Vec<([u8; 8], [u8; 3], u8, u32)>,
+    pub(crate) fcb_search: Vec<FcbSearchHit>,
     pub(crate) fcb_search_idx: usize,
-    pub(crate) dta_search: Vec<(String, u8, u32)>,
-    pub(crate) dta_search_idx: usize,
+    pub(crate) dta_searches: BTreeMap<(u16, u16), DtaSearchState>,
     pub(crate) lfn_searches: BTreeMap<u16, LfnSearchState>,
     /// Currently open `AX=714Eh` LFN search handles (must be empty on clean completion!).
     pub open_lfn_handles: BTreeSet<u16>,
@@ -258,6 +267,13 @@ pub struct DosVm {
     pub idle_yields: u32,
     /// Last `WINOLDAP` window title set via `INT 2Fh AX=168Eh`.
     pub winoldap_title: String,
+    /// Simulated `WINOLDAP` Clipboard buffer (`INT 2Fh AX=1700h..1708h`).
+    pub winoldap_clipboard: Vec<u8>,
+    /// Enables 80286 instructions (`PUSHA`/`POPA`, `PUSH imm`, `SHL imm`, `ENTER`/`LEAVE`).
+    pub cpu_286_enabled: bool,
+    /// Optional 16-bit Windows Protected-Mode `NE` LDT & subsystem state.
+    pub pmode: Option<Win16State>,
+    pub(crate) gp_fault: Option<String>,
     /// Last DOS extended error code returned by `AH=59h`.
     pub last_dos_err: u16,
     /// Whether child process termination corrupts relocated high-RAM `TRANSIENT` (`wMemTop - 0x0400`).
@@ -265,8 +281,9 @@ pub struct DosVm {
     pub(crate) exec_frames: Vec<SavedExecFrame>,
     pub(crate) last_child_exit_code: u8,
     pub(crate) tmp_counter: u16,
-    halted: bool,
-    exit_code: u8,
+    dos_ctrl_flags: u8,
+    pub(crate) halted: bool,
+    pub(crate) exit_code: u8,
     pc_bits: Vec<u64>,
     br_taken_bits: Vec<u64>,
     br_not_taken_bits: Vec<u64>,
@@ -316,8 +333,7 @@ impl DosVm {
             max_concurrent_handles: 0,
             fcb_search: Vec::new(),
             fcb_search_idx: 0,
-            dta_search: Vec::new(),
-            dta_search_idx: 0,
+            dta_searches: BTreeMap::new(),
             lfn_searches: BTreeMap::new(),
             open_lfn_handles: Self::empty_set(),
             next_lfn_handle: 0x0100,
@@ -338,11 +354,16 @@ impl DosVm {
             force_tty_console: false,
             idle_yields: 0,
             winoldap_title: String::new(),
+            winoldap_clipboard: Vec::new(),
+            cpu_286_enabled: false,
+            pmode: None,
+            gp_fault: None,
             last_dos_err: 0,
             corrupt_high_ram_on_exec: false,
             exec_frames: Vec::new(),
             last_child_exit_code: 0,
             tmp_counter: 1,
+            dos_ctrl_flags: 0,
             halted: false,
             exit_code: 0,
             pc_bits: vec![0_u64; MEM_SIZE / 64],
@@ -455,16 +476,25 @@ impl DosVm {
         (((seg as usize) << 4) + (off as usize)) % MEM_SIZE
     }
 
-    /// Reads an 8-bit byte at `seg:off`.
+    /// Reads an 8-bit byte at `seg:off` (using LDT translation when `pmode` is active).
     #[must_use]
     pub fn read_u8(&self, seg: u16, off: u16) -> u8 {
+        if let Some(pm) = &self.pmode {
+            return pm
+                .ldt
+                .get(&seg)
+                .filter(|d| usize::from(off) <= d.limit)
+                .map_or(0, |d| self.mem[(d.lin_base + usize::from(off)) % MEM_SIZE]);
+        }
         self.mem[Self::lin(seg, off)]
     }
 
-    /// Writes an 8-bit byte at `seg:off`.
+    /// Writes an 8-bit byte at `seg:off` (enforcing Protected-Mode LDT writability & limits).
     pub fn write_u8(&mut self, seg: u16, off: u16, val: u8) {
-        let addr = Self::lin(seg, off);
-        self.mem[addr] = val;
+        let addr = self.resolve_pmode_or_real(seg, off, true);
+        if self.gp_fault.is_none() {
+            self.mem[addr] = val;
+        }
     }
 
     /// Reads a little-endian 16-bit word at `seg:off`.
@@ -481,12 +511,12 @@ impl DosVm {
         self.write_u8(seg, off.wrapping_add(1), (val >> 8) as u8);
     }
 
-    fn write_u16_lin(&mut self, lin_addr: usize, val: u16) {
+    pub(crate) fn write_u16_lin(&mut self, lin_addr: usize, val: u16) {
         self.mem[lin_addr % MEM_SIZE] = (val & 0xFF) as u8;
         self.mem[(lin_addr + 1) % MEM_SIZE] = (val >> 8) as u8;
     }
 
-    fn read_u16_lin(&self, lin_addr: usize) -> u16 {
+    pub(crate) fn read_u16_lin(&self, lin_addr: usize) -> u16 {
         let lo = u16::from(self.mem[lin_addr % MEM_SIZE]);
         let hi = u16::from(self.mem[(lin_addr + 1) % MEM_SIZE]);
         lo | (hi << 8)
@@ -520,9 +550,11 @@ impl DosVm {
     }
 
     fn fetch_u8(&mut self) -> u8 {
-        let b = self.read_u8(self.sregs[Self::CS], self.ip);
-        self.ip = self.ip.wrapping_add(1);
-        b
+        let cs = self.sregs[Self::CS];
+        let ip = self.ip;
+        let addr = self.resolve_pmode_or_real(cs, ip, false);
+        self.ip = ip.wrapping_add(1);
+        self.mem[addr]
     }
 
     fn fetch_u16(&mut self) -> u16 {
@@ -539,7 +571,9 @@ impl DosVm {
 
     fn pop16(&mut self) -> u16 {
         let sp = self.regs[4];
-        let val = self.read_u16(self.sregs[Self::SS], sp);
+        let ss = self.sregs[Self::SS];
+        let _ = self.resolve_pmode_or_real(ss, sp, false);
+        let val = self.read_u16(ss, sp);
         self.regs[4] = sp.wrapping_add(2);
         val
     }
@@ -562,15 +596,24 @@ impl DosVm {
         }
     }
 
-    /// Executes one 8086 instruction and updates coverage counters.
+    /// Executes one 8086/80286 instruction and updates coverage counters.
     ///
     /// # Errors
     ///
-    /// Returns [`ToolError::Emulator`] on unimplemented opcode or hardware trap.
+    /// Returns [`ToolError::Emulator`] on unimplemented opcode, Protected-Mode `#GP` fault,
+    /// or hardware trap.
     #[allow(clippy::too_many_lines)]
     pub fn step(&mut self) -> Result<(), ToolError> {
         let start_cs = self.sregs[Self::CS];
         let start_ip = self.ip;
+        if self.pmode.is_some() && start_cs == Win16State::THUNK_CS_SEL {
+            if self.handle_win16_thunk(start_ip)? {
+                return Ok(());
+            }
+            if self.halted {
+                return Ok(());
+            }
+        }
         if start_cs == Self::ROM_SEG {
             if start_ip == 0x0080 {
                 self.handle_xms_call();
@@ -590,7 +633,15 @@ impl DosVm {
                 self.write_u16(ss, sp.wrapping_add(4), merged_f);
             }
         }
-        let lin_usize = Self::lin(start_cs, start_ip);
+        let lin_usize = self.resolve_pmode_or_real(start_cs, start_ip, false);
+        if let Some(fault) = self.gp_fault.take() {
+            return Err(ToolError::Emulator {
+                cs: start_cs,
+                ip: start_ip,
+                code: ErrCode::AccessDenied,
+                message: fault,
+            });
+        }
         let lin_pc = u32::try_from(lin_usize).unwrap_or(0);
         let pc_word = lin_usize >> 6;
         let pc_mask = 1_u64 << (lin_usize & 63);
@@ -685,12 +736,24 @@ impl DosVm {
             }
             // PUSH / POP segment registers
             0x06 => self.push16(self.sregs[Self::ES]),
-            0x07 => self.sregs[Self::ES] = self.pop16(),
+            0x07 => {
+                let sel = self.pop16();
+                self.validate_pmode_sreg(Self::ES, sel)?;
+                self.sregs[Self::ES] = sel;
+            }
             0x0E => self.push16(self.sregs[Self::CS]),
             0x16 => self.push16(self.sregs[Self::SS]),
-            0x17 => self.sregs[Self::SS] = self.pop16(),
+            0x17 => {
+                let sel = self.pop16();
+                self.validate_pmode_sreg(Self::SS, sel)?;
+                self.sregs[Self::SS] = sel;
+            }
             0x1E => self.push16(self.sregs[Self::DS]),
-            0x1F => self.sregs[Self::DS] = self.pop16(),
+            0x1F => {
+                let sel = self.pop16();
+                self.validate_pmode_sreg(Self::DS, sel)?;
+                self.sregs[Self::DS] = sel;
+            }
             // INC / DEC r16
             0x40..=0x47 => {
                 let r = usize::from(opcode - 0x40);
@@ -712,6 +775,56 @@ impl DosVm {
             0x58..=0x5F => {
                 let r = usize::from(opcode - 0x58);
                 self.regs[r] = self.pop16();
+            }
+            // 80286 PUSHA / POPA / PUSH imm / IMUL imm (strictly gated on cpu_286_enabled!)
+            0x60 if self.cpu_286_enabled => {
+                let saved_sp = self.regs[4];
+                let ax = self.regs[0];
+                let cx = self.regs[1];
+                let dx = self.regs[2];
+                let bx = self.regs[3];
+                let bp = self.regs[5];
+                let si = self.regs[6];
+                let di = self.regs[7];
+                for v in [ax, cx, dx, bx, saved_sp, bp, si, di] {
+                    self.push16(v);
+                }
+            }
+            0x61 if self.cpu_286_enabled => {
+                self.regs[7] = self.pop16();
+                self.regs[6] = self.pop16();
+                self.regs[5] = self.pop16();
+                let _discard_sp = self.pop16();
+                self.regs[3] = self.pop16();
+                self.regs[2] = self.pop16();
+                self.regs[1] = self.pop16();
+                self.regs[0] = self.pop16();
+            }
+            0x68 if self.cpu_286_enabled => {
+                let imm = self.fetch_u16();
+                self.push16(imm);
+            }
+            0x6A if self.cpu_286_enabled => {
+                let imm = Self::sign_ext_u8_to_u16(self.fetch_u8());
+                self.push16(imm);
+            }
+            0x69 | 0x6B if self.cpu_286_enabled => {
+                let (ea, reg) = self.decode_modrm(seg_override);
+                let lhs = i32::from(self.read_rm16(ea).cast_signed());
+                let rhs = if opcode == 0x69 {
+                    i32::from(self.fetch_u16().cast_signed())
+                } else {
+                    i32::from(Self::sign_ext_u8_to_u16(self.fetch_u8()).cast_signed())
+                };
+                let prod = lhs * rhs;
+                let pb = prod.to_le_bytes();
+                let res = u16::from_le_bytes([pb[0], pb[1]]);
+                self.regs[usize::from(reg)] = res;
+                if i32::from(res.cast_signed()) == prod {
+                    self.flags &= !(flags::CF | flags::OF);
+                } else {
+                    self.flags |= flags::CF | flags::OF;
+                }
             }
             // Jcc short rel8
             0x70..=0x7F => {
@@ -806,7 +919,9 @@ impl DosVm {
             0x8E => {
                 let (ea, sreg) = self.decode_modrm(seg_override);
                 let v = self.read_rm16(ea);
-                self.sregs[usize::from(sreg & 3)] = v;
+                let s_idx = usize::from(sreg & 3);
+                self.validate_pmode_sreg(s_idx, v)?;
+                self.sregs[s_idx] = v;
             }
             0x8F => {
                 let (ea, _) = self.decode_modrm(seg_override);
@@ -834,6 +949,7 @@ impl DosVm {
             0x9A => {
                 let new_ip = self.fetch_u16();
                 let new_cs = self.fetch_u16();
+                self.validate_pmode_sreg(Self::CS, new_cs)?;
                 self.push16(self.sregs[Self::CS]);
                 self.push16(self.ip);
                 self.ip = new_ip;
@@ -845,12 +961,14 @@ impl DosVm {
             0xA0 => {
                 let off = self.fetch_u16();
                 let seg = self.sregs[seg_override.unwrap_or(Self::DS)];
+                let _ = self.resolve_pmode_or_real(seg, off, false);
                 let v = self.read_u8(seg, off);
                 self.set_reg8(0, v);
             }
             0xA1 => {
                 let off = self.fetch_u16();
                 let seg = self.sregs[seg_override.unwrap_or(Self::DS)];
+                let _ = self.resolve_pmode_or_real(seg, off, false);
                 self.regs[0] = self.read_u16(seg, off);
             }
             0xA2 => {
@@ -885,6 +1003,20 @@ impl DosVm {
                 let imm = self.fetch_u16();
                 self.regs[usize::from(opcode - 0xB8)] = imm;
             }
+            // 80286 Shifts by imm8 (0xC0 / 0xC1)
+            0xC0 | 0xC1 if self.cpu_286_enabled => {
+                let (ea, subop) = self.decode_modrm(seg_override);
+                let count = self.fetch_u8() & 0x1F;
+                if opcode == 0xC0 {
+                    let v = self.read_rm8(ea);
+                    let r = self.shift8(subop, v, count);
+                    self.write_rm8(ea, r);
+                } else {
+                    let v = self.read_rm16(ea);
+                    let r = self.shift16(subop, v, count);
+                    self.write_rm16(ea, r);
+                }
+            }
             // RET imm16 / RET / RETF imm16 / RETF / IRET
             0xC2 => {
                 let pop_bytes = self.fetch_u16();
@@ -897,10 +1029,12 @@ impl DosVm {
             0xC4 | 0xC5 => {
                 let (ea, reg) = self.decode_modrm(seg_override);
                 if let RmAddr::Mem(seg, off) = ea {
+                    let _ = self.resolve_pmode_or_real(seg, off, false);
                     let new_off = self.read_u16(seg, off);
                     let new_seg = self.read_u16(seg, off.wrapping_add(2));
-                    self.regs[usize::from(reg)] = new_off;
                     let dst_sreg = if opcode == 0xC4 { Self::ES } else { Self::DS };
+                    self.validate_pmode_sreg(dst_sreg, new_seg)?;
+                    self.regs[usize::from(reg)] = new_off;
                     self.sregs[dst_sreg] = new_seg;
                 }
             }
@@ -914,19 +1048,41 @@ impl DosVm {
                 let imm = self.fetch_u16();
                 self.write_rm16(ea, imm);
             }
+            // 80286 ENTER / LEAVE (0xC8 / 0xC9)
+            0xC8 if self.cpu_286_enabled => {
+                let alloc_bytes = self.fetch_u16();
+                let _nesting = self.fetch_u8();
+                self.push16(self.regs[5]);
+                let frame_ptr = self.regs[4];
+                self.regs[4] = self.regs[4].wrapping_sub(alloc_bytes);
+                self.regs[5] = frame_ptr;
+            }
+            0xC9 if self.cpu_286_enabled => {
+                self.regs[4] = self.regs[5];
+                self.regs[5] = self.pop16();
+            }
             0xCA => {
                 let pop_bytes = self.fetch_u16();
-                self.ip = self.pop16();
-                self.sregs[Self::CS] = self.pop16();
+                let new_ip = self.pop16();
+                let new_cs = self.pop16();
+                self.validate_pmode_sreg(Self::CS, new_cs)?;
+                self.ip = new_ip;
+                self.sregs[Self::CS] = new_cs;
                 self.regs[4] = self.regs[4].wrapping_add(pop_bytes);
             }
             0xCB => {
-                self.ip = self.pop16();
-                self.sregs[Self::CS] = self.pop16();
+                let new_ip = self.pop16();
+                let new_cs = self.pop16();
+                self.validate_pmode_sreg(Self::CS, new_cs)?;
+                self.ip = new_ip;
+                self.sregs[Self::CS] = new_cs;
             }
             0xCF => {
-                self.ip = self.pop16();
-                self.sregs[Self::CS] = self.pop16();
+                let new_ip = self.pop16();
+                let new_cs = self.pop16();
+                self.validate_pmode_sreg(Self::CS, new_cs)?;
+                self.ip = new_ip;
+                self.sregs[Self::CS] = new_cs;
                 self.flags = self.pop16() | 0x0002;
             }
             // INT imm8
@@ -955,6 +1111,7 @@ impl DosVm {
             0xD7 => {
                 let seg = self.sregs[seg_override.unwrap_or(Self::DS)];
                 let off = self.regs[3].wrapping_add(u16::from(self.get_reg8(0)));
+                let _ = self.resolve_pmode_or_real(seg, off, false);
                 let v = self.read_u8(seg, off);
                 self.set_reg8(0, v);
             }
@@ -989,6 +1146,7 @@ impl DosVm {
             0xEA => {
                 let new_ip = self.fetch_u16();
                 let new_cs = self.fetch_u16();
+                self.validate_pmode_sreg(Self::CS, new_cs)?;
                 self.ip = new_ip;
                 self.sregs[Self::CS] = new_cs;
             }
@@ -1027,6 +1185,15 @@ impl DosVm {
                     message: format!("unsupported 8086 opcode 0x{other:02X}"),
                 });
             }
+        }
+
+        if let Some(fault) = self.gp_fault.take() {
+            return Err(ToolError::Emulator {
+                cs: start_cs,
+                ip: start_ip,
+                code: ErrCode::AccessDenied,
+                message: fault,
+            });
         }
 
         Ok(())
@@ -1092,10 +1259,13 @@ impl DosVm {
         u16::from_le_bytes([b, hi])
     }
 
-    fn read_rm8(&self, ea: RmAddr) -> u8 {
+    fn read_rm8(&mut self, ea: RmAddr) -> u8 {
         match ea {
             RmAddr::Reg(r) => self.get_reg8(r),
-            RmAddr::Mem(seg, off) => self.read_u8(seg, off),
+            RmAddr::Mem(seg, off) => {
+                let _ = self.resolve_pmode_or_real(seg, off, false);
+                self.read_u8(seg, off)
+            }
         }
     }
 
@@ -1106,10 +1276,14 @@ impl DosVm {
         }
     }
 
-    fn read_rm16(&self, ea: RmAddr) -> u16 {
+    fn read_rm16(&mut self, ea: RmAddr) -> u16 {
         match ea {
             RmAddr::Reg(r) => self.regs[usize::from(r)],
-            RmAddr::Mem(seg, off) => self.read_u16(seg, off),
+            RmAddr::Mem(seg, off) => {
+                let _ = self.resolve_pmode_or_real(seg, off, false);
+                let _ = self.resolve_pmode_or_real(seg, off.wrapping_add(1), false);
+                self.read_u16(seg, off)
+            }
         }
     }
 
@@ -1555,8 +1729,10 @@ impl DosVm {
             }
             3 => {
                 if let RmAddr::Mem(seg, off) = ea {
+                    let _ = self.resolve_pmode_or_real(seg, off, false);
                     let tgt_ip = self.read_u16(seg, off);
                     let tgt_cs = self.read_u16(seg, off.wrapping_add(2));
+                    self.validate_pmode_sreg(Self::CS, tgt_cs)?;
                     self.push16(self.sregs[Self::CS]);
                     self.push16(self.ip);
                     self.ip = tgt_ip;
@@ -1569,8 +1745,10 @@ impl DosVm {
             }
             5 => {
                 if let RmAddr::Mem(seg, off) = ea {
+                    let _ = self.resolve_pmode_or_real(seg, off, false);
                     let tgt_ip = self.read_u16(seg, off);
                     let tgt_cs = self.read_u16(seg, off.wrapping_add(2));
+                    self.validate_pmode_sreg(Self::CS, tgt_cs)?;
                     self.ip = tgt_ip;
                     self.sregs[Self::CS] = tgt_cs;
                 }
@@ -1713,7 +1891,7 @@ impl DosVm {
             if self.corrupt_high_ram_on_exec {
                 let trn_seg = self
                     .read_u16(Self::DEFAULT_PSP_SEG, 0x0002)
-                    .wrapping_sub(0x0400);
+                    .wrapping_sub(0x0A20);
                 self.write_u8(trn_seg, 0x0004, 0xCC);
             }
             self.last_child_exit_code = code;
@@ -1874,7 +2052,13 @@ impl DosVm {
                         self.regs[1] = 0x0E1E;
                         self.regs[2] = 0;
                     }
-                    0x2E => {}
+                    0x2E => {
+                        if (self.get_reg8(0) & 1) != 0 {
+                            self.dos_ctrl_flags |= 0x02;
+                        } else {
+                            self.dos_ctrl_flags &= !0x02;
+                        }
+                    }
                     0x2F => {
                         self.sregs[Self::ES] = self.dta.0;
                         self.regs[3] = self.dta.1;
@@ -1886,11 +2070,17 @@ impl DosVm {
                         self.regs[3] = 0;
                         self.regs[1] = 0;
                     }
-                    0x33 => {
-                        if self.get_reg8(0) == 0 {
-                            self.set_reg8(2, 0);
+                    0x33 => match self.get_reg8(0) {
+                        0x00 => self.set_reg8(2, self.dos_ctrl_flags & 0x01),
+                        0x01 => {
+                            if (self.get_reg8(2) & 0x01) != 0 {
+                                self.dos_ctrl_flags |= 0x01;
+                            } else {
+                                self.dos_ctrl_flags &= !0x01;
+                            }
                         }
-                    }
+                        _ => {}
+                    },
                     0x36 => {
                         let dl = self.get_reg8(2);
                         if dl > 3 {
@@ -1949,6 +2139,23 @@ impl DosVm {
                             self.set_cf(true);
                         } else {
                             let path = self.read_asciiz(self.sregs[Self::DS], self.regs[2]);
+                            if Self::is_nul_device(&path) {
+                                match self.alloc_file_handle(OpenFile {
+                                    path: String::from(NUL_SENTINEL),
+                                    pos: 0,
+                                }) {
+                                    Ok(h) => {
+                                        self.regs[0] = h;
+                                        self.set_cf(false);
+                                    }
+                                    Err(e) => {
+                                        self.last_dos_err = e.code();
+                                        self.regs[0] = self.last_dos_err;
+                                        self.set_cf(true);
+                                    }
+                                }
+                                return Ok(());
+                            }
                             let key = self.norm_vfs_key(&path);
                             if ah == 0x3C {
                                 if self.vfs_meta.get(&key).is_some_and(|m| (m.attr & 0x01) != 0) {
@@ -2010,6 +2217,11 @@ impl DosVm {
                             self.regs[0] = u16::try_from(avail).unwrap_or(0);
                             self.set_cf(false);
                         } else if let Some(of) = self.handles.get(&bx) {
+                            if of.path == NUL_SENTINEL {
+                                self.regs[0] = 0;
+                                self.set_cf(false);
+                                return Ok(());
+                            }
                             let path_clone = of.path.clone();
                             let start_pos = of.pos;
                             let data = self.vfs.get(&path_clone).map_or(&[][..], Vec::as_slice);
@@ -2054,6 +2266,11 @@ impl DosVm {
                             self.regs[0] = self.regs[1];
                             self.set_cf(false);
                         } else if let Some(of) = self.handles.get(&bx) {
+                            if of.path == NUL_SENTINEL {
+                                self.regs[0] = self.regs[1];
+                                self.set_cf(false);
+                                return Ok(());
+                            }
                             let path_clone = of.path.clone();
                             let pos = of.pos;
                             let entry = self.vfs.entry(path_clone).or_default();
@@ -2223,6 +2440,9 @@ impl DosVm {
                         self.regs[0] = u16::from(self.last_child_exit_code);
                     }
                     0x4E | 0x4F => self.handle_dos200_find(ah == 0x4E),
+                    0x54 => {
+                        self.set_reg8(0, u8::from((self.dos_ctrl_flags & 0x02) != 0));
+                    }
                     0x56 => {
                         let old_k =
                             self.norm_vfs_key(&self.read_asciiz(self.sregs[Self::DS], self.regs[2]));
@@ -2342,6 +2562,24 @@ impl DosVm {
                     0x6C => {
                         if matches!(self.era, DosEra::Dos400 | DosEra::Dos710) {
                             let raw = self.read_asciiz(self.sregs[Self::DS], self.regs[6]);
+                            if Self::is_nul_device(&raw) {
+                                match self.alloc_file_handle(OpenFile {
+                                    path: String::from(NUL_SENTINEL),
+                                    pos: 0,
+                                }) {
+                                    Ok(h) => {
+                                        self.regs[0] = h;
+                                        self.regs[1] = 1;
+                                        self.set_cf(false);
+                                    }
+                                    Err(e) => {
+                                        self.last_dos_err = e.code();
+                                        self.regs[0] = self.last_dos_err;
+                                        self.set_cf(true);
+                                    }
+                                }
+                                return Ok(());
+                            }
                             let key = self.norm_vfs_key(&raw);
                             let action = self.regs[2];
                             let exists = self.vfs.contains_key(&key);
@@ -2436,6 +2674,68 @@ impl DosVm {
                     self.winoldap_title = self.read_asciiz(self.sregs[Self::ES], self.regs[7]);
                     self.regs[0] = 1;
                 }
+                0x1700 => {
+                    if self.win_enh_mode {
+                        self.regs[0] = 0x030A;
+                    }
+                }
+                0x1701 | 0x1708 => {
+                    self.regs[0] = u16::from(self.win_enh_mode);
+                }
+                0x1702 => {
+                    if self.win_enh_mode {
+                        self.winoldap_clipboard.clear();
+                        self.regs[0] = 1;
+                    } else {
+                        self.regs[0] = 0;
+                    }
+                }
+                0x1703 => {
+                    if self.win_enh_mode {
+                        let es = self.sregs[Self::ES];
+                        let bx = self.regs[3];
+                        let len = usize::from(self.regs[1]);
+                        let mut data = Vec::with_capacity(len);
+                        for i in 0..len {
+                            let b = self.read_u8(es, bx.wrapping_add(u16::try_from(i).unwrap_or(0)));
+                            if b == 0 {
+                                break;
+                            }
+                            data.push(b);
+                        }
+                        self.winoldap_clipboard = data;
+                        self.regs[0] = 1;
+                    } else {
+                        self.regs[0] = 0;
+                    }
+                }
+                0x1704 => {
+                    if self.win_enh_mode && !self.winoldap_clipboard.is_empty() {
+                        self.regs[0] =
+                            u16::try_from(self.winoldap_clipboard.len() + 1).unwrap_or(0);
+                    } else {
+                        self.regs[0] = 0;
+                    }
+                    self.regs[2] = 0;
+                }
+                0x1705 => {
+                    if self.win_enh_mode && !self.winoldap_clipboard.is_empty() {
+                        let es = self.sregs[Self::ES];
+                        let bx = self.regs[3];
+                        let clip = self.winoldap_clipboard.clone();
+                        for (i, &b) in clip.iter().enumerate() {
+                            self.write_u8(es, bx.wrapping_add(u16::try_from(i).unwrap_or(0)), b);
+                        }
+                        self.write_u8(
+                            es,
+                            bx.wrapping_add(u16::try_from(clip.len()).unwrap_or(0)),
+                            0,
+                        );
+                        self.regs[0] = 1;
+                    } else {
+                        self.regs[0] = 0;
+                    }
+                }
                 0x4300 => {
                     self.set_reg8(0, if self.xms_enabled { 0x80 } else { 0x00 });
                 }
@@ -2489,39 +2789,36 @@ impl DosVm {
                 }
             }
             0x48 => {
-                // Allocate BX paragraphs (walk MCB chain from 0x07FF; support high-end or first-fit)
+                // Allocate BX paragraphs using authentic MS-DOS First-Fit Low MCB strategy!
                 let want = self.regs[3];
                 let mut mcb_seg = Self::DEFAULT_ENV_SEG - 1;
-                let mut best_seg: Option<(u16, u16)> = None;
-                for _ in 0..64 {
+                let mut first_seg: Option<(u16, u16, u8)> = None;
+                for _ in 0..128 {
                     let lin = Self::lin(mcb_seg, 0);
                     let kind = self.mem[lin];
                     let owner = self.read_u16_lin(lin + 1);
                     let sz = self.read_u16_lin(lin + 3);
                     if owner == 0 && sz >= want {
-                        best_seg = Some((mcb_seg, sz));
+                        first_seg = Some((mcb_seg, sz, kind));
+                        break;
                     }
                     if kind == b'Z' {
                         break;
                     }
                     mcb_seg = mcb_seg.wrapping_add(sz).wrapping_add(1);
                 }
-                if let Some((fseg, fsz)) = best_seg {
+                if let Some((fseg, fsz, orig_kind)) = first_seg {
                     let psp = Self::DEFAULT_PSP_SEG;
                     if fsz > want + 1 {
-                        // Split from top so transient shell sits at high end of RAM!
                         let rem = fsz - want - 1;
-                        let lin = Self::lin(fseg, 0);
-                        self.mem[lin] = b'M';
-                        self.write_u16_lin(lin + 3, rem);
-                        let high_mcb = fseg.wrapping_add(rem).wrapping_add(1);
-                        self.write_mcb(high_mcb, b'Z', psp, want);
-                        self.regs[0] = high_mcb.wrapping_add(1);
+                        self.write_mcb(fseg, b'M', psp, want);
+                        let rem_mcb = fseg.wrapping_add(want).wrapping_add(1);
+                        self.write_mcb(rem_mcb, orig_kind, 0, rem);
                     } else {
                         let lin = Self::lin(fseg, 0);
                         self.write_u16_lin(lin + 1, psp);
-                        self.regs[0] = fseg.wrapping_add(1);
                     }
+                    self.regs[0] = fseg.wrapping_add(1);
                     self.set_cf(false);
                 } else {
                     self.regs[0] = ErrCode::OutOfMemory.code();

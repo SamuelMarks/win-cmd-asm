@@ -327,6 +327,8 @@ pub struct CanonicalModule {
     pub format: BinaryFormat,
     /// Optional `@entry <symbol>` entrypoint for executable formats.
     pub entry: Option<String>,
+    /// Optional `@safeseh <symbol>` IA-32 `/SAFESEH` exception handler symbol.
+    pub safeseh: Option<String>,
     /// Ordered top-level items.
     pub items: Vec<TopItem>,
 }

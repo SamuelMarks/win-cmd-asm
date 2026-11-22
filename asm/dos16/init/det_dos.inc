@@ -355,8 +355,8 @@
     mov word [cs:wTmpXmsOff], bx
     mov word [cs:wTmpXmsSeg], es
 
-    ; Allocate 24 KiB XMS block (AH=09h, DX=24)
-    mov dx, 24
+    ; Allocate 32 KiB XMS block (AH=09h, DX=32) matching 2x16 KiB EMS transient capacity
+    mov dx, 32
     mov ah, 0x09
     call far [cs:wTmpXmsOff]
     cmp ax, 1

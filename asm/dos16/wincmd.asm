@@ -12,136 +12,148 @@
 @include "../inc/ast_kind.inc"
 
 ;; @const TRN_RESERVE_PARAS
-;; @desc Paragraphs reserved at top of conventional RAM (26 KiB: 19K code/rodata + 7K scratch/arena).
-@const TRN_RESERVE_PARAS = 0x0680
+;; @desc Paragraphs reserved at top of conventional RAM (40.5 KiB: up to 32K code/rodata + 8.5K scratch/arena).
+@const TRN_RESERVE_PARAS = 0x0A20
 
 ;; @const TRN_SCRATCH_BASE
 ;; @desc Start offset of mutable scratch variables inside wTrnSeg (above immutable code/rodata).
-@const TRN_SCRATCH_BASE = 0x4C00
+@const TRN_SCRATCH_BASE = 0x8000
 
 ;; @const wArenaBase
 ;; @desc Transient bump arena base offset word in scratch RAM.
-@const wArenaBase = 0x4C00
+@const wArenaBase = 0x8000
 
 ;; @const wArenaPtr
 ;; @desc Transient bump arena current pointer word in scratch RAM.
-@const wArenaPtr = 0x4C02
+@const wArenaPtr = 0x8002
 
 ;; @const wArenaLimit
 ;; @desc Transient bump arena upper limit word in scratch RAM.
-@const wArenaLimit = 0x4C04
+@const wArenaLimit = 0x8004
 
 ;; @const bTrnDosMajor
 ;; @desc Cached DOS major version inside TRANSIENT scratch RAM.
-@const bTrnDosMajor = 0x4C06
+@const bTrnDosMajor = 0x8006
 
 ;; @const bTrnDosMinor
 ;; @desc Cached DOS minor version inside TRANSIENT scratch RAM.
-@const bTrnDosMinor = 0x4C07
+@const bTrnDosMinor = 0x8007
 
 ;; @const bTrnEcho
 ;; @desc Active ECHO ON/OFF state inside TRANSIENT scratch RAM.
-@const bTrnEcho = 0x4C08
+@const bTrnEcho = 0x8008
 
 ;; @const bTrnExitReq
 ;; @desc Non-zero when EXIT command requests shell termination.
-@const bTrnExitReq = 0x4C09
+@const bTrnExitReq = 0x8009
 
 ;; @const wTrnExitCode
 ;; @desc Last command exit code / ERRORLEVEL inside TRANSIENT scratch RAM.
-@const wTrnExitCode = 0x4C0A
+@const wTrnExitCode = 0x800A
 
 ;; @const wTrnResSeg
 ;; @desc Segment of RESIDENT PSP for state callbacks.
-@const wTrnResSeg = 0x4C0C
+@const wTrnResSeg = 0x800C
 
 ;; @const bTrnConEof
 ;; @desc Non-zero when interactive console reaches physical 0x1A EOF.
-@const bTrnConEof = 0x4C0E
+@const bTrnConEof = 0x800E
 
 ;; @const bTrnRedirActive
 ;; @desc Non-zero when per-statement I/O redirection is active.
-@const bTrnRedirActive = 0x4C0F
+@const bTrnRedirActive = 0x800F
 
 ;; @const bmDbcsLead
 ;; @desc 32-byte (256-bit) active DBCS lead-byte lookup bitmap in TRANSIENT scratch RAM.
-@const bmDbcsLead = 0x4C10
+@const bmDbcsLead = 0x8010
 
 ;; @const szNumScratch
 ;; @desc 32-byte numeric formatting buffer in TRANSIENT scratch RAM.
-@const szNumScratch = 0x4C30
+@const szNumScratch = 0x8030
 
 ;; @const wSavedStdinHdl
 ;; @desc Duplicated original stdin handle during DOS 2.00+ '<' redirection.
-@const wSavedStdinHdl = 0x4C50
+@const wSavedStdinHdl = 0x8050
 
 ;; @const wSavedStdoutHdl
 ;; @desc Duplicated original stdout handle during DOS 2.00+ '>' / '>>' redirection.
-@const wSavedStdoutHdl = 0x4C52
+@const wSavedStdoutHdl = 0x8052
 
 ;; @const wTrnLdr125Ptr
 ;; @desc Far pointer (offset, segment) to resident ldr125_exec_far trampoline.
-@const wTrnLdr125Ptr = 0x4C54
+@const wTrnLdr125Ptr = 0x8054
 
 ;; @const wTrnExec200Ptr
 ;; @desc Far pointer (offset, segment) to resident exec200_far trampoline.
-@const wTrnExec200Ptr = 0x4C58
+@const wTrnExec200Ptr = 0x8058
 
 ;; @const wTrnRed125InPtr
 ;; @desc Far pointer (offset, segment) to resident red125_install_far trampoline.
-@const wTrnRed125InPtr = 0x4C5C
+@const wTrnRed125InPtr = 0x805C
 
 ;; @const wTrnRed125RmPtr
 ;; @desc Far pointer (offset, segment) to resident red125_remove_far trampoline.
-@const wTrnRed125RmPtr = 0x4C60
+@const wTrnRed125RmPtr = 0x8060
 
 ;; @const bTrnIsCall
 ;; @desc Non-zero when current statement was prefixed with CALL (pushes instead of chaining .BAT).
-@const bTrnIsCall = 0x4C64
+@const bTrnIsCall = 0x8064
 
 ;; @const bForDepth
 ;; @desc Active FOR loop variable nesting depth (0..6) in TRANSIENT scratch RAM.
-@const bForDepth = 0x4C65
+@const bForDepth = 0x8065
 
 ;; @const wTrnRandSeed
 ;; @desc 16-bit LCG state for %RANDOM% dynamic variable synthesis.
-@const wTrnRandSeed = 0x4C66
+@const wTrnRandSeed = 0x8066
+
+;; @const bModDlrLen
+;; @desc Byte length of active $VAR: name during %~$VAR:n modifier evaluation.
+@const bModDlrLen = 0x8068
+
+;; @const bPipeDepth
+;; @desc Active spooled pipeline nesting depth (0..9) in TRANSIENT scratch RAM.
+@const bPipeDepth = 0x8069
+
+;; @const bForRDepth
+;; @desc Active FOR /R directory recursion depth (0..5) in TRANSIENT scratch RAM.
+@const bForRDepth = 0x806A
 
 ;; @const TRN_HIST_BUF
-;; @desc 128-byte COMMAND.COM / DOSKEY template & recall buffer at wTrnSeg:0x4C80.
-@const TRN_HIST_BUF = 0x4C80
+;; @desc 128-byte COMMAND.COM / DOSKEY template & recall buffer at wTrnSeg:0x8080.
+@const TRN_HIST_BUF = 0x8080
 
 ;; @const TRN_CMD_BUF
-;; @desc 256-byte command line buffer at wTrnSeg:0x4D00 populated by INIT, batch, or line_ed.
-@const TRN_CMD_BUF = 0x4D00
+;; @desc 256-byte command line buffer at wTrnSeg:0x8100 populated by INIT, batch, or line_ed.
+@const TRN_CMD_BUF = 0x8100
 
 ;; @const TRN_BATCH_ARGS
 ;; @desc 256-byte (4 * 64B) batch argument table for %1..%9 / %* across nested CALL frames.
-@const TRN_BATCH_ARGS = 0x4E00
+@const TRN_BATCH_ARGS = 0x8200
 
 ;; @const TRN_FOR_VARS
 ;; @desc 416-byte (6 * 68B) active FOR variable scope stack.
-@const TRN_FOR_VARS = 0x4F00
+@const TRN_FOR_VARS = 0x8300
 
 ;; @const TRN_ENV_BUF
 ;; @desc 512-byte fallback environment block for MS-DOS 1.25 (when wEnvSeg == 0).
-@const TRN_ENV_BUF = 0x50A0
+@const TRN_ENV_BUF = 0x84A0
 
 ;; @const TRN_CMD_WORK
 ;; @desc 1,792-byte dedicated command I/O scratch buffer isolated from the AST arena.
-@const TRN_CMD_WORK = 0x52A0
+@const TRN_CMD_WORK = 0x86A0
 
 ;; @const TRN_ARENA_START
-;; @desc Start offset of dynamic statement & AST bump arena inside wTrnSeg (0x59A0..0x65FE).
-@const TRN_ARENA_START = 0x59A0
+;; @desc Start offset of dynamic statement & AST bump arena inside wTrnSeg (0x8DA0..0x9FFE).
+@const TRN_ARENA_START = 0x8DA0
 
 ;; @const TRN_ARENA_END
 ;; @desc End offset (canary location) of dynamic statement bump arena inside wTrnSeg.
-@const TRN_ARENA_END = 0x65FE
+@const TRN_ARENA_END = 0x9FFE
 
 ;; @const TRN_STACK_TOP
-;; @desc Top of transient stack inside wTrnSeg (0x67FE, even-aligned).
-@const TRN_STACK_TOP = 0x67FE
+;; @desc Top of transient stack inside wTrnSeg (0xA1FE, even-aligned).
+@const TRN_STACK_TOP = 0xA1FE
 
 ; ============================================================================
 ; SECTION 1: RESIDENT (ORG 0x0100, <= 2,816 bytes low conventional memory)
@@ -185,6 +197,7 @@ res_boot_trampoline:
 @data dw wTrnEntrySeg, 0x0000
 @data dw wSavedSS, 0x0000
 @data dw wSavedSP, 0x0000
+@data db bNeedTrnCheck, 1
 @data dw wResSavedSS, 0x0000
 @data dw wResSavedSP, 0x0000
 @res byte bResSavedStk, 16
@@ -258,8 +271,12 @@ res_boot_trampoline:
     pop es
 
 .shell_loop:
+    cmp byte [bNeedTrnCheck], 0
+    je .trn_verified
     call res_ensure_transient
     jc .fatal_reload
+    mov byte [bNeedTrnCheck], 0
+.trn_verified:
 
     mov word [cs:wSavedSS], ss
     mov word [cs:wSavedSP], sp
@@ -420,46 +437,6 @@ res_boot_trampoline:
     retf
 @endproc
 
-;; @proc trn_print_prompt
-;; @abi dos16
-;; @in Current default drive & working directory
-;; @out Prints era-accurate "A>" (DOS 1.25) or "C:\DIR>" (DOS 2.00+) prompt
-;; @err none
-;; @clobbers ax, bx, cx, dx, si, di
-;; @desc Emits the interactive command prompt using era-appropriate CWD syscall.
-@proc trn_print_prompt
-    push bp
-    mov bp, TRN_CMD_WORK
-    mov ah, DOS_GET_DEF_DRIVE
-    int 0x21
-    add al, 'A'
-    mov byte [bp], al
-    cmp byte [bTrnDosMajor], 2
-    jb .prompt_125
-    mov byte [bp + 1], ':'
-    mov byte [bp + 2], 0x5C
-    mov si, bp
-    add si, 3
-    xor dl, dl
-    call k700_getcwd
-    mov si, bp
-.find_end:
-    cmp byte [si], 0
-    je .put_gt
-    inc si
-    jmp .find_end
-.prompt_125:
-    mov si, bp
-    inc si
-.put_gt:
-    mov byte [si], '>'
-    mov byte [si + 1], 0
-    mov si, bp
-    call con_write_asciiz
-    pop bp
-    ret
-@endproc
-
 @include "core/crc16.inc"
 @include "core/arena.inc"
 @include "core/math32.inc"
@@ -471,6 +448,9 @@ res_boot_trampoline:
 @include "hal/k_dos200.inc"
 @include "hal/k_dos400.inc"
 @include "hal/k_dos700.inc"
+@include "vfs/devices.inc"
+@include "vfs/pathnorm.inc"
+@include "vfs/glob_dp.inc"
 @include "read/line_ed.inc"
 @include "read/stream.inc"
 @include "parse/var_ops.inc"
@@ -480,7 +460,9 @@ res_boot_trampoline:
 @include "parse/prs_ast.inc"
 @include "parse/phase34.inc"
 @include "rt/arith16.inc"
+@include "rt/env_stk.inc"
 @include "cmd/m2_cmds.inc"
+@include "cmd/m4_cmds.inc"
 
 ;; @proc trn_skip_ws
 ;; @abi dos16
@@ -723,12 +705,16 @@ res_boot_trampoline:
     cmp al, 0x00
     je .list_all_env
     cmp al, '/'
-    jne .assign_or_prefix
+    je .chk_set_sw
+    jmp .assign_or_prefix
 
+.chk_set_sw:
     mov ah, byte [si + 1]
     and ah, 0xDF
     cmp ah, 'A'
-    je .do_set_a
+    jne .chk_set_p
+    jmp .do_set_a
+.chk_set_p:
     cmp ah, 'P'
     je .do_set_p
     jmp .assign_or_prefix
@@ -753,9 +739,13 @@ res_boot_trampoline:
     inc di
     test al, al
     jnz .le_cp
+    cmp byte [TRN_CMD_WORK], '='
+    je .le_lp
+    push bx
     mov si, TRN_CMD_WORK
     call con_write_asciiz
     call con_write_crlf
+    pop bx
     jmp .le_lp
 .le_done:
     pop es
@@ -777,12 +767,14 @@ res_boot_trampoline:
 .sp_nlp:
     mov al, byte [si]
     test al, al
-    jz .set_syn_err
+    jz .j_set_syn1
     cmp al, '='
     je .sp_got_eq
     inc si
     inc cx
     jmp .sp_nlp
+.j_set_syn1:
+    jmp .set_syn_err
 .sp_got_eq:
     mov word [bp - 4], cx
     inc si
@@ -819,9 +811,8 @@ res_boot_trampoline:
     add si, 2
     call lex_skip_hspace
     cmp al, '"'
-    jne .sa_chk_lhs
+    jne .sa_run_eval
     inc si
-    ; Strip trailing quote in-place if present
     push si
 .sa_strip_rq:
     cmp byte [si], 0
@@ -836,77 +827,12 @@ res_boot_trampoline:
 .sa_rq_dn:
     pop si
 
-.sa_chk_lhs:
-    ; Check optional IDENT= prefix before expression!
-    push si
-    mov bx, si
-    xor cx, cx
-.sa_id_lp:
-    mov al, byte [si]
-    cmp al, '='
-    je .sa_has_lhs
-    cmp al, 0x20
-    je .sa_sk_id_ws
-    cmp al, 'A'
-    jb .sa_chk_dig
-    cmp al, 'Z'
-    jbe .sa_id_ok
-    cmp al, 'a'
-    jb .sa_no_lhs
-    cmp al, 'z'
-    jbe .sa_id_ok
-    cmp al, '_'
-    je .sa_id_ok
-    jmp .sa_no_lhs
-.sa_chk_dig:
-    test cx, cx
-    jz .sa_no_lhs
-    cmp al, '0'
-    jb .sa_no_lhs
-    cmp al, '9'
-    ja .sa_no_lhs
-.sa_id_ok:
-    inc cx
-    inc si
-    jmp .sa_id_lp
-.sa_sk_id_ws:
-    inc si
-    cmp byte [si], '='
-    je .sa_has_lhs
-    jmp .sa_no_lhs
-
-.sa_has_lhs:
-    test cx, cx
-    jz .sa_no_lhs
-    cmp byte [si + 1], '=' ; '==' is equality, NOT assignment!
-    je .sa_no_lhs
-    add sp, 2 ; discard saved SI
-    mov word [bp - 2], bx
-    mov word [bp - 4], cx
-    inc si
-    jmp .sa_run_eval
-
-.sa_no_lhs:
-    pop si
-
 .sa_run_eval:
     call sa_eval_expr
     jc .sa_err
     mov di, szNumScratch
     call fmt_i32_dec
-    ; Store in environment if [bp-2] != 0!
-    cmp word [bp - 2], 0
-    je .sa_chk_echo
-    push di
-    push cx
-    mov dx, di
-    mov si, word [bp - 2]
-    mov cx, word [bp - 4]
-    call env_set_var
-    pop cx
-    pop di
 
-.sa_chk_echo:
     ; Print numeric result when NOT inside a .BAT script (interactive / /C cmd)!
     push es
     mov es, word [wTrnResSeg]
@@ -950,15 +876,118 @@ res_boot_trampoline:
 .peq_lp:
     mov al, byte [si]
     test al, al
-    jz .set_syn_err
+    jz .filter_pfx
+    cmp al, 0x0D
+    je .filter_pfx
     cmp al, '='
-    je .got_plain_eq
+    jne .chk_peq_q
+    jmp .got_plain_eq
+.chk_peq_q:
+    cmp al, '"'
+    jne .peq_adv
+    cmp word [bp - 6], 0
+    jne .filter_pfx
+.peq_adv:
     inc si
     inc cx
     jmp .peq_lp
+
+.filter_pfx:
+    ; Trim trailing spaces from prefix [DS:BX, CX]
+.trim_pfx:
+    test cx, cx
+    jnz .chk_pfx_sp
+    jmp .set_syn_err
+.chk_pfx_sp:
+    mov di, bx
+    add di, cx
+    cmp byte [di - 1], 0x20
+    jne .run_pfx_scan
+    dec cx
+    jmp .trim_pfx
+
+.run_pfx_scan:
+    mov word [bp - 2], bx
+    mov word [bp - 4], cx
+    call env_ensure_block
+    push es
+    mov es, ax
+    xor bx, bx
+    mov dx, ds
+    cmp ax, dx
+    jne .fp_init
+    mov bx, TRN_ENV_BUF
+.fp_init:
+    xor dx, dx ; match count
+.fp_lp:
+    cmp byte [es:bx], 0
+    je .fp_done
+    mov di, TRN_CMD_WORK
+.fp_cp:
+    mov al, byte [es:bx]
+    mov byte [di], al
+    inc bx
+    inc di
+    test al, al
+    jnz .fp_cp
+
+    ; Skip hidden '=D:' entries unless prefix itself begins with '='
+    mov si, word [bp - 2]
+    cmp byte [si], '='
+    je .fp_cmp_st
+    cmp byte [TRN_CMD_WORK], '='
+    je .fp_lp
+
+.fp_cmp_st:
+    mov cx, word [bp - 4]
+    mov di, TRN_CMD_WORK
+.fp_cmp_ch:
+    mov al, byte [di]
+    test al, al
+    jz .fp_lp
+    cmp al, '='
+    je .fp_lp
+    call chr_to_upper
+    mov ah, al
+    mov al, byte [si]
+    call chr_to_upper
+    cmp al, ah
+    jne .fp_lp
+    inc si
+    inc di
+    loop .fp_cmp_ch
+
+    inc dx
+    push bx
+    push dx
+    mov si, TRN_CMD_WORK
+    call con_write_asciiz
+    call con_write_crlf
+    pop dx
+    pop bx
+    jmp .fp_lp
+
+.fp_done:
+    pop es
+    test dx, dx
+    jz .fp_none
+    mov word [wTrnExitCode], 0
+    add sp, 6
+    pop bp
+    ret
+.fp_none:
+    mov ax, ERR_FILE_NOT_FOUND
+    call trn_err_dos
+    mov word [wTrnExitCode], 1
+    add sp, 6
+    pop bp
+    ret
+
 .got_plain_eq:
     test cx, cx
-    jz .set_syn_err
+    jnz .have_lhs_len
+    jmp .set_syn_err
+.have_lhs_len:
     inc si
     ; Copy value to TRN_CMD_WORK (stripping trailing '"' if [bp-6] == 1!)
     mov di, TRN_CMD_WORK
@@ -982,7 +1011,9 @@ res_boot_trampoline:
     mov si, bx
     mov dx, TRN_CMD_WORK
     call env_set_var
-    jc .sa_err
+    jnc .pv_ok
+    jmp .sa_err
+.pv_ok:
     mov word [wTrnExitCode], 0
     add sp, 6
     pop bp
@@ -995,7 +1026,7 @@ res_boot_trampoline:
 ;; @out Sets [bTrnExitReq]=1 (and pops batch frame on /B) and optional [wTrnExitCode]
 ;; @err none
 ;; @clobbers ax, bx, cx, dx, si, di
-;; @desc Implements EXIT [/B] [exitCode].
+;; @desc Implements EXIT [/B] [exitCode] with automatic SETLOCAL unwinding.
 @proc cmd_exit
     call trn_skip_ws
     cmp al, '/'
@@ -1012,10 +1043,20 @@ res_boot_trampoline:
     dec byte [es:resState + RES_STATE.bBatchDepth]
 .no_pop_b:
     pop es
+    push si
+    call env_unwind_batch_locals
+    pop si
     jmp .parse_ec
 
 .full_exit:
     mov byte [bTrnExitReq], 1
+    push es
+    mov es, word [wTrnResSeg]
+    mov byte [es:resState + RES_STATE.bBatchDepth], 0
+    pop es
+    push si
+    call env_unwind_batch_locals
+    pop si
 .parse_ec:
     call trn_skip_ws
     cmp al, 0x00
@@ -1037,19 +1078,20 @@ res_boot_trampoline:
 ;; @clobbers ax, bx, cx, dx, si, di
 ;; @desc Top-level Phase 1 -> Phase 2 AST -> Phase 3/4 execution pipeline.
 @proc trn_exec_line
-    call arena_reset
-    mov byte [bForDepth], 0
-
     push bp
     mov bp, sp
-    sub sp, 8
-    ; [bp-2]=blk_buf (512B), [bp-4]=blk_len, [bp-6]=line_p1 (256B), [bp-8]=paren_depth
+    sub sp, 10
+    ; [bp-2]=blk_buf (512B), [bp-4]=blk_len, [bp-6]=line_p1 (256B), [bp-8]=paren_depth, [bp-10]=arena_mark
+    mov ax, word [wArenaPtr]
+    mov word [bp - 10], ax
 
     push si
     mov cx, 780
     call arena_alloc
     pop si
-    jc .done_exec_ln
+    jnc .exec_ln_mem
+    jmp .done_exec_ln
+.exec_ln_mem:
     mov word [bp - 2], di
     add di, 516
     mov word [bp - 6], di
@@ -1138,7 +1180,9 @@ res_boot_trampoline:
     mov word [wTrnExitCode], 1
 
 .done_exec_ln:
-    add sp, 8
+    mov ax, word [bp - 10]
+    mov word [wArenaPtr], ax
+    add sp, 10
     pop bp
     ret
 @endproc
@@ -1226,7 +1270,7 @@ res_boot_trampoline:
     mov di, addr(szKwCopy)
     call trn_match_word
     jc .nx_del
-    call cmd_copy
+    call cmd_copy_m4
     jmp .cleanup_done
 .nx_del:
     mov di, addr(szKwDel)
@@ -1276,7 +1320,8 @@ res_boot_trampoline:
     call trn_match_word
     jc .nx_chcp
 .do_cd:
-    call cmd_chdir
+    xor dl, dl
+    call cmd_cd_ex
     jmp .cleanup_done
 .nx_chcp:
     mov di, addr(szKwChcp)
@@ -1299,13 +1344,165 @@ res_boot_trampoline:
 .nx_vol:
     mov di, addr(szKwVol)
     call trn_match_word
-    jc .nx_call
+    jc .nx_move
     call cmd_vol
+    jmp .cleanup_done
+.nx_move:
+    mov di, addr(szKwMove)
+    call trn_match_word
+    jc .nx_path
+    call cmd_move
+    jmp .cleanup_done
+.nx_path:
+    mov di, addr(szKwPath)
+    call trn_match_word
+    jc .nx_dpath
+    call cmd_path
+    jmp .cleanup_done
+.nx_dpath:
+    mov di, addr(szKwDpath)
+    call trn_match_word
+    jc .nx_prompt
+    call cmd_dpath
+    jmp .cleanup_done
+.nx_prompt:
+    mov di, addr(szKwPrompt)
+    call trn_match_word
+    jc .nx_pause
+    call cmd_prompt
+    jmp .cleanup_done
+.nx_pause:
+    mov di, addr(szKwPause)
+    call trn_match_word
+    jc .nx_break
+    call cmd_pause
+    jmp .cleanup_done
+.nx_break:
+    mov di, addr(szKwBreak)
+    call trn_match_word
+    jc .nx_verify
+    call cmd_break
+    jmp .cleanup_done
+.nx_verify:
+    mov di, addr(szKwVerify)
+    call trn_match_word
+    jc .nx_date
+    call cmd_verify
+    jmp .cleanup_done
+.nx_date:
+    mov di, addr(szKwDate)
+    call trn_match_word
+    jc .nx_time
+    call cmd_date
+    jmp .cleanup_done
+.nx_time:
+    mov di, addr(szKwTime)
+    call trn_match_word
+    jc .nx_color
+    call cmd_time
+    jmp .cleanup_done
+.nx_color:
+    mov di, addr(szKwColor)
+    call trn_match_word
+    jc .nx_assoc
+    call cmd_color
+    jmp .cleanup_done
+.nx_assoc:
+    mov di, addr(szKwAssoc)
+    call trn_match_word
+    jc .nx_ftype
+    call cmd_assoc
+    jmp .cleanup_done
+.nx_ftype:
+    mov di, addr(szKwFtype)
+    call trn_match_word
+    jc .nx_keys
+    call cmd_ftype
+    jmp .cleanup_done
+.nx_keys:
+    mov di, addr(szKwKeys)
+    call trn_match_word
+    jc .nx_ctty
+    call cmd_keys
+    jmp .cleanup_done
+.nx_ctty:
+    mov di, addr(szKwCtty)
+    call trn_match_word
+    jc .nx_doskey
+    call cmd_ctty
+    jmp .cleanup_done
+.nx_doskey:
+    mov di, addr(szKwDoskey)
+    call trn_match_word
+    jc .nx_mode
+    call cmd_doskey
+    jmp .cleanup_done
+.nx_mode:
+    mov di, addr(szKwMode)
+    call trn_match_word
+    jc .nx_start
+    call cmd_mode
+    jmp .cleanup_done
+.nx_start:
+    mov di, addr(szKwStart)
+    call trn_match_word
+    jc .nx_mklink
+    call cmd_start
+    jmp .cleanup_done
+.nx_mklink:
+    mov di, addr(szKwMklink)
+    call trn_match_word
+    jc .nx_setlocal
+    call cmd_mklink
+    jmp .cleanup_done
+.nx_setlocal:
+    mov di, addr(szKwSetlocal)
+    call trn_match_word
+    jc .nx_endlocal
+    call cmd_setlocal
+    jmp .cleanup_done
+.nx_endlocal:
+    mov di, addr(szKwEndlocal)
+    call trn_match_word
+    jc .nx_pushd
+    call cmd_endlocal
+    jmp .cleanup_done
+.nx_pushd:
+    mov di, addr(szKwPushd)
+    call trn_match_word
+    jc .nx_popd
+    call cmd_pushd
+    jmp .cleanup_done
+.nx_popd:
+    mov di, addr(szKwPopd)
+    call trn_match_word
+    jc .nx_lh
+    call cmd_popd
+    jmp .cleanup_done
+.nx_lh:
+    mov di, addr(szKwLh)
+    call trn_match_word
+    jnc .do_lh
+    mov di, addr(szKwLoadhigh)
+    call trn_match_word
+    jc .nx_subsh
+.do_lh:
+    call cmd_loadhigh
+    jmp .cleanup_done
+.nx_subsh:
+    mov di, addr(szKwCmd)
+    call trn_match_word
+    jnc .do_subsh
+    mov di, addr(szKwCommand)
+    call trn_match_word
+    jc .nx_call
+.do_subsh:
+    call cmd_subshell
     jmp .cleanup_done
 .nx_call:
     mov di, addr(szKwCall)
     call trn_match_word
-    jc .nx_ext
+    jc .nx_drv_chg
     mov byte [bTrnIsCall], 1
     call trn_skip_ws
     cmp al, ':'
@@ -1368,6 +1565,45 @@ res_boot_trampoline:
     pop si
     jmp .cleanup_done
 
+.nx_drv_chg:
+    ; Check bare drive selection 'A:'..'Z:' (followed only by optional whitespace/EOL)
+    cmp byte [si + 1], ':'
+    jne .nx_ext
+    mov al, byte [si]
+    call chr_to_upper
+    cmp al, 'A'
+    jb .nx_ext
+    cmp al, 'Z'
+    ja .nx_ext
+    push si
+    add si, 2
+    call trn_skip_ws
+    mov ah, byte [si]
+    pop si
+    cmp ah, 0x00
+    je .do_drv_sel
+    cmp ah, 0x0D
+    jne .nx_ext
+.do_drv_sel:
+    mov dl, al
+    sub dl, 'A'
+    push dx
+    mov ah, DOS_SELECT_DISK
+    int 0x21
+    mov ah, DOS_GET_DEF_DRIVE
+    int 0x21
+    pop dx
+    cmp al, dl
+    jne .bad_drv_sel
+    call sync_drive_cwd_env
+    mov word [wTrnExitCode], 0
+    jmp .cleanup_done
+.bad_drv_sel:
+    mov ax, ERR_INVALID_DRIVE
+    call trn_err_dos
+    mov word [wTrnExitCode], 1
+    jmp .cleanup_done
+
 .nx_ext:
     call trn_exec_external
 
@@ -1376,6 +1612,7 @@ res_boot_trampoline:
 @endproc
 
 @data db szCrLf, 0x0D, 0x0A
+@data db szCrLf2, 0x0D, 0x0A
 @data db szDot, "."
 @data db szZeroChar, "0"
 @data db szVerPrefix, "WINCMD Pure-ASM Shell [MS-DOS ", 0
@@ -1383,6 +1620,30 @@ res_boot_trampoline:
 @data db szHelpBanner, "WINCMD [/P] [/C cmd] [/K cmd] [/S] [/Q] [/D] [/E:ON|OFF|n] [/V:ON|OFF] [/F] [/MSG]", 0
 @data db szEchoIsOn, "ECHO is on", 0
 @data db szEchoIsOff, "ECHO is off", 0
+@data db szDevNul, "NUL"
+@data db szDevCon, "CON"
+@data db szDevAux, "AUX"
+@data db szDevPrn, "PRN"
+@data db szDevComPfx, "COM"
+@data db szDevLptPfx, "LPT"
+@data db szDevClock, "CLOCK$"
+@data db szDevConIn, "CONIN$"
+@data db szDevConOut, "CONOUT$"
+@data db szSlEnExt, "ENABLEEXTENSIONS"
+@data db szSlDisExt, "DISABLEEXTENSIONS"
+@data db szSlEnDel, "ENABLEDELAYEDEXPANSION"
+@data db szSlDisDel, "DISABLEDELAYEDEXPANSION"
+@data db szCopyCatTmp, "_WCPCAT$.TMP", 0
+@data db szOneFileMoved, "        1 file(s) moved", 0
+@data db szNoPath, "No Path", 0
+@data db szPausePrompt, "Press any key to continue . . .", 0
+@data db szBreakIs, "BREAK is ", 0
+@data db szVerifyIs, "VERIFY is ", 0
+@data db szKeysIs, "KEYS is ", 0
+@data db szCurDateIs, "The current date is: ", 0
+@data db szCurTimeIs, "The current time is: ", 0
+@data db szRegFileName, "WINCMD.REG", 0
+@data db szModeConStatus, "Status for device CON: Columns=80 Lines=25", 0
 @data db szKwRem, "REM", 0
 @data db szKwVer, "VER", 0
 @data db szKwEcho, "ECHO", 0
@@ -1409,6 +1670,32 @@ res_boot_trampoline:
 @data db szKwTruename, "TRUENAME", 0
 @data db szKwTitle, "TITLE", 0
 @data db szKwVol, "VOL", 0
+@data db szKwMove, "MOVE", 0
+@data db szKwPath, "PATH", 0
+@data db szKwDpath, "DPATH", 0
+@data db szKwPrompt, "PROMPT", 0
+@data db szKwPause, "PAUSE", 0
+@data db szKwBreak, "BREAK", 0
+@data db szKwVerify, "VERIFY", 0
+@data db szKwDate, "DATE", 0
+@data db szKwTime, "TIME", 0
+@data db szKwColor, "COLOR", 0
+@data db szKwAssoc, "ASSOC", 0
+@data db szKwFtype, "FTYPE", 0
+@data db szKwKeys, "KEYS", 0
+@data db szKwCtty, "CTTY", 0
+@data db szKwDoskey, "DOSKEY", 0
+@data db szKwMode, "MODE", 0
+@data db szKwStart, "START", 0
+@data db szKwMklink, "MKLINK", 0
+@data db szKwSetlocal, "SETLOCAL", 0
+@data db szKwEndlocal, "ENDLOCAL", 0
+@data db szKwPushd, "PUSHD", 0
+@data db szKwPopd, "POPD", 0
+@data db szKwLh, "LH", 0
+@data db szKwLoadhigh, "LOADHIGH", 0
+@data db szKwCmd, "CMD", 0
+@data db szKwCommand, "COMMAND", 0
 @data db szKwCall, "CALL", 0
 @data db szKwOn, "ON", 0
 @data db szKwOff, "OFF", 0
@@ -1454,9 +1741,17 @@ res_boot_trampoline:
     mov byte [es:si + RES_STATE.bEchoFlag], 1
     mov byte [es:si + RES_STATE.bCmdExt], 1
 
-    ; Compute top-of-memory segment for TRANSIENT from [PSP:0x0002]
+    ; Compute top-of-memory segment for TRANSIENT from [PSP:0x0002], clamping above RESIDENT
     mov ax, word [es:PSP.wMemTop]
+    mov cx, bp
+    add cx, (0x0020 + RES_PARAS)
     sub ax, TRN_RESERVE_PARAS
+    jc .clamp_trn
+    cmp ax, cx
+    jae .trn_seg_ok
+.clamp_trn:
+    mov ax, cx
+.trn_seg_ok:
     mov word [es:si + RES_STATE.wTrnSeg], ax
     mov word [es:si + RES_STATE.wTrnParas], TRN_PARAS
 
@@ -1477,12 +1772,12 @@ res_boot_trampoline:
     call init_setup_ems_xms
     call init_parse_tail
 
-    ; Copy 32-word position-independent relocator stub to (wTrnSeg + 0x0660):0000
+    ; Copy 32-word position-independent relocator stub to (wTrnSeg + TRN_RESERVE_PARAS - 0x0020):0000
     mov es, word [cs:wInitPsp]
     mov di, word [cs:wInitResOff]
     mov dx, word [es:di + RES_STATE.wTrnSeg]
     mov ax, dx
-    add ax, 0x0660
+    add ax, (TRN_RESERVE_PARAS - 0x0020)
     mov es, ax
     mov word [cs:wRelocStubOff], 0
     mov word [cs:wRelocStubSeg], ax
@@ -1552,44 +1847,50 @@ res_boot_trampoline:
 ;; @clobbers ax, bx, cx, dx, si, di
 ;; @desc Computes fast algebraic tableless CRC-16-CCITT over pristine TRANSIENT image.
 @proc init_calc_trn_crc
+    push ds
     push es
     mov ax, word [cs:wInitPsp]
     add ax, (0x0010 + RES_PARAS)
-    mov es, ax
+    mov ds, ax
     xor si, si
-    mov cx, TRN_BYTE_LEN
-    mov ax, 0xFFFF
+    mov di, TRN_BYTE_LEN
+    mov cl, 4
+    mov dx, 0xFFFF
 .b_lp:
-    mov dh, al
-    mov al, byte [es:si]
-    inc si
-    xor al, ah
+    lodsb
+    xor al, dh
     mov bl, al
-    shr bl, 1
-    shr bl, 1
-    shr bl, 1
-    shr bl, 1
+    shr bl, cl
     xor al, bl
+    mov dh, dl
     mov dl, al
-    mov bl, al
-    shl bl, 1
-    shl bl, 1
-    shl bl, 1
-    shl bl, 1
-    xor dh, bl
     xor ah, ah
+    shl ax, cl
+    xor dh, al
     shl ax, 1
+    xor dx, ax
+
+    lodsb
+    xor al, dh
+    mov bl, al
+    shr bl, cl
+    xor al, bl
+    mov dh, dl
+    mov dl, al
+    xor ah, ah
+    shl ax, cl
+    xor dh, al
     shl ax, 1
-    shl ax, 1
-    shl ax, 1
-    shl ax, 1
-    xor ax, dx
-    loop .b_lp
+    xor dx, ax
+
+    cmp si, di
+    jb .b_lp
 
     mov es, word [cs:wInitPsp]
     mov di, word [cs:wInitResOff]
-    mov word [es:di + RES_STATE.wTrnCrc16], ax
+    mov word [es:di + RES_STATE.wTrnCrc16], dx
     pop es
+    pop ds
     ret
 @endproc
 

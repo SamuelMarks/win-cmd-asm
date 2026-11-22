@@ -54,6 +54,37 @@
     ret
 @endproc
 
+;; @proc con_write_char
+;; @abi dos16
+;; @in DL = character byte to write
+;; @out Character written to stdout (via AH=40h on DOS 2.00+ or AH=02h on DOS 1.25)
+;; @err none
+;; @clobbers ax, bx, cx, dx, si
+;; @desc Writes one character in DL to standard output across MS-DOS 1.25 through 8.0.
+@proc con_write_char
+    cmp byte [bTrnDosMajor], 2
+    jb .c125
+    push bp
+    push dx
+    mov bp, sp
+    push ds
+    push ss
+    pop ds
+    mov dx, bp
+    mov cx, 1
+    mov bx, 1
+    mov ah, 0x40
+    int 0x21
+    pop ds
+    pop dx
+    pop bp
+    ret
+.c125:
+    mov ah, 0x02
+    int 0x21
+    ret
+@endproc
+
 ;; @proc con_write_crlf
 ;; @abi dos16
 ;; @in none

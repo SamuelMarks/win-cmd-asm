@@ -130,14 +130,18 @@
     mov di, addr(szDynErrLvl)
     mov dx, 10
     call slice_eq_nocase
-    jnc .dyn_errorlevel
+    jc .try_dyn_cd
+    jmp .dyn_errorlevel
+.try_dyn_cd:
 
     mov si, word [bp - 2]
     mov cx, word [bp - 4]
     mov di, addr(szDynCd)
     mov dx, 2
     call slice_eq_nocase
-    jnc .dyn_cd
+    jc .try_dyn_extv
+    jmp .dyn_cd
+.try_dyn_extv:
 
     mov si, word [bp - 2]
     mov cx, word [bp - 4]
@@ -153,8 +157,79 @@
     mov di, addr(szDynRandom)
     mov dx, 6
     call slice_eq_nocase
-    jc .not_found
+    jc .try_dyn_date
     jmp .dyn_random
+
+.try_dyn_date:
+    mov si, word [bp - 2]
+    mov cx, word [bp - 4]
+    mov di, addr(szDynDate)
+    mov dx, 4
+    call slice_eq_nocase
+    jc .try_dyn_time
+    jmp .dyn_date
+
+.try_dyn_time:
+    mov si, word [bp - 2]
+    mov cx, word [bp - 4]
+    mov di, addr(szDynTime)
+    mov dx, 4
+    call slice_eq_nocase
+    jc .try_dyn_cmdln
+    jmp .dyn_time
+
+.try_dyn_cmdln:
+    mov si, word [bp - 2]
+    mov cx, word [bp - 4]
+    mov di, addr(szDynCmdLine)
+    mov dx, 10
+    call slice_eq_nocase
+    jc .try_dyn_numa
+    jmp .dyn_cmdline
+
+.try_dyn_numa:
+    mov si, word [bp - 2]
+    mov cx, word [bp - 4]
+    mov di, addr(szDynNuma)
+    mov dx, 21
+    call slice_eq_nocase
+    jc .try_dyn_eqhex
+    jmp .dyn_numa
+
+.try_dyn_eqhex:
+    mov si, word [bp - 2]
+    mov cx, word [bp - 4]
+    mov di, addr(szDynExitHex)
+    mov dx, 9
+    call slice_eq_nocase
+    jc .try_dyn_eqasc
+    jmp .dyn_exit_hex
+
+.try_dyn_eqasc:
+    mov si, word [bp - 2]
+    mov cx, word [bp - 4]
+    mov di, addr(szDynExitAsc)
+    mov dx, 14
+    call slice_eq_nocase
+    jc .try_dyn_eqdrv
+    jmp .dyn_exit_asc
+
+.try_dyn_eqdrv:
+    ; Check '=A:' .. '=Z:' (3-byte name starting with '=' and ending with ':')
+    cmp word [bp - 4], 3
+    jne .not_found
+    mov si, word [bp - 2]
+    cmp byte [si], '='
+    jne .not_found
+    cmp byte [si + 2], ':'
+    jne .not_found
+    mov al, byte [si + 1]
+    call chr_to_upper
+    cmp al, 'A'
+    jb .not_found
+    cmp al, 'Z'
+    ja .not_found
+    jmp .dyn_eq_drv
 
 .not_found:
     mov di, word [bp - 6]
@@ -241,6 +316,145 @@
     xor dx, dx
     mov di, word [bp - 6]
     call fmt_i32_dec
+    add sp, 8
+    pop bp
+    clc
+    ret
+
+.dyn_date:
+    mov di, word [bp - 6]
+    call fmt_cur_date_str
+    add sp, 8
+    pop bp
+    clc
+    ret
+
+.dyn_time:
+    mov di, word [bp - 6]
+    call fmt_cur_time_str
+    add sp, 8
+    pop bp
+    clc
+    ret
+
+.dyn_numa:
+    mov di, word [bp - 6]
+    mov byte [di], '0'
+    mov byte [di + 1], 0
+    mov cx, 1
+    add sp, 8
+    pop bp
+    clc
+    ret
+
+.dyn_cmdline:
+    mov di, word [bp - 6]
+    push es
+    mov es, word [wTrnResSeg]
+    mov es, word [es:resState + RES_STATE.wPspSeg]
+    xor ch, ch
+    mov cl, byte [es:0x0080]
+    cmp cl, 126
+    jbe .cmdl_ok
+    mov cl, 126
+.cmdl_ok:
+    mov si, 0x0081
+    xor dx, dx
+.cmdl_lp:
+    test cx, cx
+    jz .cmdl_dn
+    mov al, byte [es:si]
+    cmp al, 0x0D
+    je .cmdl_dn
+    mov byte [di], al
+    inc si
+    inc di
+    inc dx
+    dec cx
+    jmp .cmdl_lp
+.cmdl_dn:
+    pop es
+    mov byte [di], 0
+    mov cx, dx
+    add sp, 8
+    pop bp
+    clc
+    ret
+
+.dyn_exit_hex:
+    mov di, word [bp - 6]
+    mov byte [di], '0'
+    mov byte [di + 1], '0'
+    mov byte [di + 2], '0'
+    mov byte [di + 3], '0'
+    add di, 4
+    mov dx, word [wTrnExitCode]
+    mov cx, 4
+.eh_lp:
+    push cx
+    mov cl, 4
+    rol dx, cl
+    pop cx
+    mov al, dl
+    and al, 0x0F
+    cmp al, 10
+    jb .eh_dig
+    add al, ('A' - 10)
+    jmp .eh_put
+.eh_dig:
+    add al, '0'
+.eh_put:
+    mov byte [di], al
+    inc di
+    loop .eh_lp
+    mov byte [di], 0
+    mov cx, 8
+    add sp, 8
+    pop bp
+    clc
+    ret
+
+.dyn_exit_asc:
+    mov ax, word [wTrnExitCode]
+    cmp al, 0x20
+    jb .not_found_near
+    cmp al, 0x7E
+    ja .not_found_near
+    mov di, word [bp - 6]
+    mov byte [di], al
+    mov byte [di + 1], 0
+    mov cx, 1
+    add sp, 8
+    pop bp
+    clc
+    ret
+.not_found_near:
+    jmp .not_found
+
+.dyn_eq_drv:
+    ; AL = uppercase drive letter 'A'..'Z'
+    mov di, word [bp - 6]
+    mov byte [di], al
+    mov byte [di + 1], ':'
+    mov byte [di + 2], 0x5C
+    mov byte [di + 3], 0
+    cmp byte [bTrnDosMajor], 2
+    jb .eqd_125
+    mov dl, al
+    sub dl, 'A'
+    inc dl
+    mov si, di
+    add si, 3
+    call k700_getcwd
+    mov si, word [bp - 6]
+    call prs_strlen_si
+    add sp, 8
+    pop bp
+    clc
+    ret
+.eqd_125:
+    mov byte [di + 2], 0
+    mov cx, 2
     add sp, 8
     pop bp
     clc
@@ -584,12 +798,9 @@
     jmp .rep_scan
 
 .rep_no_match:
-    cmp byte [bp - 14], 0
-    jne .star_adv
     mov al, byte [si]
     mov byte [di], al
     inc di
-.star_adv:
     inc si
     dec cx
     jmp .rep_scan
@@ -655,3 +866,9 @@
 @data db szDynCd, "CD"
 @data db szDynExtVer, "CMDEXTVERSION"
 @data db szDynRandom, "RANDOM"
+@data db szDynDate, "DATE"
+@data db szDynTime, "TIME"
+@data db szDynCmdLine, "CMDCMDLINE"
+@data db szDynNuma, "HIGHESTNUMANODENUMBER"
+@data db szDynExitHex, "=ExitCode"
+@data db szDynExitAsc, "=ExitCodeAscii"

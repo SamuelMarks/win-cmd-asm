@@ -155,13 +155,15 @@
 @proc mod_eval_value
     push bp
     mov bp, sp
-    sub sp, 16
+    sub sp, 18
     ; [bp-2]=out_buf, [bp-4]=mod_bx, [bp-6]=dlr_ptr, [bp-8]=clean_buf, [bp-10]=full_buf
-    ; [bp-12]=last_slash_off, [bp-14]=last_dot_off, [bp-16]=out_cur
+    ; [bp-12]=last_slash_off, [bp-14]=last_dot_off, [bp-16]=out_cur, [bp-18]=arena_mark
     mov word [bp - 2], di
     mov word [bp - 16], di
     mov word [bp - 4], bx
     mov word [bp - 6], dx
+    mov ax, word [wArenaPtr]
+    mov word [bp - 18], ax
 
     push si
     mov cx, 320
@@ -171,7 +173,7 @@
     mov di, word [bp - 2]
     mov byte [di], 0
     xor cx, cx
-    add sp, 16
+    add sp, 18
     pop bp
     ret
 .mod_mem_ok:
@@ -216,8 +218,10 @@
     inc cx
     rep movsb
     pop cx
+    mov ax, word [bp - 18]
+    mov word [wArenaPtr], ax
     mov di, word [bp - 2]
-    add sp, 16
+    add sp, 18
     pop bp
     ret
 
@@ -226,24 +230,25 @@
     test byte [bp - 3], 0x04
     jnz .do_dlr_search
     jmp .canon_full
+.j_empty_mod0:
+    jmp .empty_mod_out
 .do_dlr_search:
     mov si, word [bp - 6]
     xor ch, ch
     mov cl, byte [bModDlrLen]
     mov di, word [bp - 10]
     call env_get_var
-    jc .empty_mod_out
+    jc .j_empty_mod0
     ; Search semicolon-separated directories in [bp-10] for [bp-8]
     mov si, word [bp - 10]
 .path_seg_lp:
     cmp byte [si], 0
-    je .empty_mod_out
-    mov di, szNumScratch ; temporary candidate? Use arena!
+    je .j_empty_mod0
     push si
     mov cx, 140
     call arena_alloc
     pop si
-    jc .empty_mod_out
+    jc .j_empty_mod0
     mov dx, di
 .cp_dir_seg:
     mov al, byte [si]
@@ -303,6 +308,10 @@
     pop dx
     pop si
     mov word [bp - 8], dx
+    mov al, byte [bp - 4]
+    and al, (MOD_FULL + MOD_DRV + MOD_PATH + MOD_NAME + MOD_EXT + MOD_SHORT)
+    jnz .canon_full
+    or byte [bp - 4], (MOD_FULL + MOD_DRV + MOD_PATH + MOD_NAME + MOD_EXT)
     jmp .canon_full
 .not_in_seg:
     pop dx
@@ -310,10 +319,12 @@
     jmp .path_seg_lp
 
 .empty_mod_out:
+    mov ax, word [bp - 18]
+    mov word [wArenaPtr], ax
     mov di, word [bp - 2]
     mov byte [di], 0
     xor cx, cx
-    add sp, 16
+    add sp, 18
     pop bp
     ret
 
@@ -444,10 +455,50 @@
 .chk_mod_time:
     test byte [bp - 3], 0x01
     jz .chk_mod_size
-    mov si, addr(szDefModTime)
+    mov dx, 0x0021 ; default 1980-01-01 if missing
+    xor cx, cx
+    cmp byte [bTrnDosMajor], 2
+    jb .tm_125
+    mov cx, 64
+    call arena_alloc
+    jc .emit_tm_str
+    mov dx, word [bp - 8]
+    mov cx, 0x0017
+    push di
+    call k200_find_first
+    pop bx
+    jc .tm_def
+    mov dx, word [bx + DTA_FIND.wDate]
+    mov cx, word [bx + DTA_FIND.wTime]
+    jmp .emit_tm_str
+.tm_125:
+    mov cx, 64
+    call arena_alloc
+    jc .tm_def
+    mov si, word [bp - 8]
+    push di
+    call k125_open
+    pop bx
+    jc .tm_def
+    mov dx, word [bx + XFCB.fcb + FCB.wDate]
+    mov cx, word [bx + XFCB.fcb + FCB.wTime]
+    push dx
+    push cx
+    mov di, bx
+    call k125_close
+    pop cx
+    pop dx
+    jmp .emit_tm_str
+.tm_def:
+    mov dx, 0x0021
+    xor cx, cx
+.emit_tm_str:
+    test dx, dx
+    jnz .tm_nonz
+    mov dx, 0x0021
+.tm_nonz:
     mov di, word [bp - 16]
-    mov cx, 17
-    rep movsb
+    call mod_fmt_fat_datetime
     mov word [bp - 16], di
 
 .chk_mod_size:
@@ -594,15 +645,100 @@
     mov word [bp - 16], di
 
 .fin_mod:
+    mov ax, word [bp - 18]
+    mov word [wArenaPtr], ax
     mov di, word [bp - 16]
     mov byte [di], 0
     mov cx, di
     sub cx, word [bp - 2]
     mov di, word [bp - 2]
-    add sp, 16
+    add sp, 18
     pop bp
     ret
 @endproc
 
-@data db bModDlrLen, 0
-@data db szDefModTime, "11/21/2026 14:30 "
+;; @proc mod_fmt_2dig
+;; @abi dos16
+;; @in AL = value 0..99, DS:DI = output cursor
+;; @out Writes two zero-padded ASCII digits at DS:DI and advances DI by 2
+;; @err none
+;; @clobbers ax, bx, dx, di
+;; @desc Formats a 2-digit 00..99 field for FAT date/time rendering on strict 8086.
+@proc mod_fmt_2dig
+    xor ah, ah
+    mov bl, 10
+    div bl
+    add al, '0'
+    add ah, '0'
+    mov byte [di], al
+    mov byte [di + 1], ah
+    add di, 2
+    ret
+@endproc
+
+;; @proc mod_fmt_fat_datetime
+;; @abi dos16
+;; @in DX = packed FAT wDate ((yr-1980)<<9 | mon<<5 | day), CX = packed FAT wTime (hr<<11 | min<<5), DS:DI = out
+;; @out Writes "MM/DD/YYYY HH:MM " (17 bytes) at DS:DI and advances DI by 17
+;; @err none
+;; @clobbers ax, bx, cx, dx, di
+;; @desc Unpacks 16-bit FAT date & time bitfields into MM/DD/YYYY HH:MM  format.
+@proc mod_fmt_fat_datetime
+    push cx
+    push dx
+
+    ; Month = (DX >> 5) & 0x0F
+    mov ax, dx
+    mov cl, 5
+    shr ax, cl
+    and al, 0x0F
+    call mod_fmt_2dig
+    mov byte [di], '/'
+    inc di
+
+    ; Day = DX & 0x1F
+    pop dx
+    push dx
+    mov al, dl
+    and al, 0x1F
+    call mod_fmt_2dig
+    mov byte [di], '/'
+    inc di
+
+    ; Year = ((DX >> 9) & 0x7F) + 1980
+    pop ax
+    mov cl, 9
+    shr ax, cl
+    and ax, 0x007F
+    add ax, 1980
+    xor dx, dx
+    mov bx, 100
+    div bx
+    push dx
+    call mod_fmt_2dig
+    pop ax
+    call mod_fmt_2dig
+    mov byte [di], ' '
+    inc di
+
+    ; Hour = (CX >> 11) & 0x1F
+    pop dx ; DX = wTime
+    push dx
+    mov ax, dx
+    mov cl, 11
+    shr ax, cl
+    and al, 0x1F
+    call mod_fmt_2dig
+    mov byte [di], ':'
+    inc di
+
+    ; Minute = (wTime >> 5) & 0x3F
+    pop ax
+    mov cl, 5
+    shr ax, cl
+    and al, 0x3F
+    call mod_fmt_2dig
+    mov byte [di], ' '
+    inc di
+    ret
+@endproc

@@ -577,6 +577,8 @@
     call slice_eq_nocase
     pop si
     jc .chk_kw_for
+    mov ax, word [bp - 6]
+    mov word [wArenaPtr], ax
     call prs_parse_if_after_kw
     jc .j_prs_err2
     add sp, 8
@@ -593,6 +595,8 @@
     call slice_eq_nocase
     pop si
     jc .parse_simple_cmd
+    mov ax, word [bp - 6]
+    mov word [wArenaPtr], ax
     call prs_parse_for_after_kw
     jc .j_prs_err2
     add sp, 8
@@ -604,6 +608,8 @@
     jmp .prs_err
 
 .empty_primary:
+    mov ax, word [bp - 6]
+    mov word [wArenaPtr], ax
     mov si, word [bp - 8]
     cmp word [bp - 4], 0
     je .j_ret_nop
@@ -622,14 +628,11 @@
     ret
 
 .parse_simple_cmd:
-    ; Scan from [bp-8] up to unquoted/unescaped '&', '|', ')', CR, LF, NUL,
-    ; extracting any mid-line/trailing redirections into [bp-4] and copying clean command text!
+    ; Reclaim 132B keyword probe buffer and assemble clean command in TRN_CMD_WORK+1280!
+    mov ax, word [bp - 6]
+    mov word [wArenaPtr], ax
     mov si, word [bp - 8]
-    push si
-    mov cx, 256
-    call arena_alloc
-    pop si
-    jc .j_prs_err2
+    mov di, (TRN_CMD_WORK + 1280)
     mov word [bp - 6], di ; clean cmd buffer
     xor cx, cx            ; clean cmd len
     xor dx, dx            ; DL=quote state (0/1), DH=inner '(' balance
@@ -669,6 +672,28 @@
     mov al, byte [si]
     test al, al
     jz .j_sc_done
+    cmp al, 0x81
+    jb .sc_ascii
+    push bx
+    push cx
+    call dbcs_is_lead
+    pop cx
+    pop bx
+    jnc .sc_ascii
+    cmp byte [si + 1], 0
+    je .sc_ascii
+    cmp cx, 250
+    jae .sc_sk_db2
+    mov byte [di], al
+    mov ah, byte [si + 1]
+    mov byte [di + 1], ah
+    add di, 2
+    add cx, 2
+.sc_sk_db2:
+    add si, 2
+    jmp .sc_lp
+
+.sc_ascii:
     cmp al, '"'
     jne .sc_not_q
     xor dl, 1
@@ -780,6 +805,15 @@
 .sc_done:
     mov byte [di], 0
     push si
+    inc cx
+    push cx
+    call arena_alloc
+    pop cx
+    jc .sc_pop_err
+    mov bx, di
+    mov si, (TRN_CMD_WORK + 1280)
+    rep movsb
+    mov word [bp - 6], bx
     mov al, AST_SIMPLE_CMD
     mov ah, byte [bp - 2]
     call prs_alloc_node
@@ -793,6 +827,9 @@
     pop bp
     clc
     ret
+.sc_pop_err:
+    pop si
+    jmp .prs_err
 
 .prs_err:
     add sp, 8
@@ -930,6 +967,9 @@
     jmp .if_err
 .j_if_syn1:
     jmp .if_syn
+.j_pop_if_err0:
+    pop si
+    jmp .if_err
 
 .binary_if_cond:
     ; Check if '==' was glued inside [bp-14] (e.g. 'IF "%A%"=="1"' or 'IF a==b')!
@@ -957,14 +997,39 @@
     jmp .scan_glued_eq
 
 .split_glued_eq:
-    mov byte [bx], 0
+    ; Copy [bp-14] ("lhs==rhs") into dedicated arena storage so [bp-14] ELSE probe cannot clobber it!
+    mov cx, bx
+    sub cx, di ; LHS length in CX
+    push si
+    push cx
+    push bx
+    mov cx, 144
+    call arena_alloc
+    pop bx
+    pop cx
+    jc .j_pop_if_err0
     mov word [bp - 6], di
+    mov si, word [bp - 14]
+    rep movsb
+    mov byte [di], 0
+    inc di
     mov byte [bp - 4], IFCMP_STR_EQ
     add bx, 2
     cmp byte [bx], 0
-    je .j_read_rhs
-    mov word [bp - 8], bx
+    je .pop_read_rhs
+    mov word [bp - 8], di
+    mov si, bx
+.cp_glued_rhs:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_glued_rhs
+    pop si
     jmp .parse_then_branch
+.pop_read_rhs:
+    pop si
 .j_read_rhs:
     jmp .read_rhs_word
 
@@ -997,7 +1062,22 @@
     cmp byte [bx + 2], 0
     je .j_read_rhs
     add bx, 2
-    mov word [bp - 8], bx
+    push si
+    push bx
+    mov cx, 136
+    call arena_alloc
+    pop bx
+    jc .pop_if_err
+    mov word [bp - 8], di
+    mov si, bx
+.cp_sep_rhs:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_sep_rhs
+    pop si
     jmp .parse_then_branch
 
 .j_if_syn2:
@@ -1175,7 +1255,10 @@
     je .mode_r
     cmp ah, 'F'
     je .mode_f
+.j_for_syn0:
     jmp .for_syn
+.j_for_err0:
+    jmp .for_err
 
 .mode_d:
     mov word [bp - 2], FORMODE_DIRS
@@ -1192,10 +1275,10 @@
     mov cx, 136
     call arena_alloc
     pop si
-    jc .j_for_err1
+    jc .j_for_err0
     mov word [bp - 6], di
     call lex_read_word
-    jc .j_for_syn1
+    jc .j_for_syn0
     jmp .read_for_var
 
 .mode_f:
@@ -1207,10 +1290,10 @@
     mov cx, 136
     call arena_alloc
     pop si
-    jc .j_for_err1
+    jc .j_for_err0
     mov word [bp - 6], di
     call lex_read_word
-    jc .j_for_syn1
+    jc .j_for_syn0
 
 .read_for_var:
     call lex_skip_hspace

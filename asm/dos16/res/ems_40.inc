@@ -18,38 +18,45 @@
 ;; @clobbers ax, bx, cx, dx, si
 ;; @desc Tableless resident CRC-16-CCITT verifier detecting high-RAM overwrites by children.
 @proc res_crc16_check
-    push es
-    mov es, word [cs:wTrnEntrySeg]
+    push ds
+    push di
+    mov ds, word [cs:wTrnEntrySeg]
     xor si, si
-    mov cx, TRN_BYTE_LEN
-    mov ax, 0xFFFF
+    mov di, TRN_BYTE_LEN
+    mov cl, 4
+    mov dx, 0xFFFF
 .byte_lp:
-    mov dh, al
-    mov al, byte [es:si]
-    inc si
-    xor al, ah
+    lodsb
+    xor al, dh
     mov bl, al
-    shr bl, 1
-    shr bl, 1
-    shr bl, 1
-    shr bl, 1
+    shr bl, cl
     xor al, bl
+    mov dh, dl
     mov dl, al
-    mov bl, al
-    shl bl, 1
-    shl bl, 1
-    shl bl, 1
-    shl bl, 1
-    xor dh, bl
     xor ah, ah
+    shl ax, cl
+    xor dh, al
     shl ax, 1
+    xor dx, ax
+
+    lodsb
+    xor al, dh
+    mov bl, al
+    shr bl, cl
+    xor al, bl
+    mov dh, dl
+    mov dl, al
+    xor ah, ah
+    shl ax, cl
+    xor dh, al
     shl ax, 1
-    shl ax, 1
-    shl ax, 1
-    shl ax, 1
-    xor ax, dx
-    loop .byte_lp
-    pop es
+    xor dx, ax
+
+    cmp si, di
+    jb .byte_lp
+    mov ax, dx
+    pop di
+    pop ds
     ret
 @endproc
 
@@ -70,6 +77,11 @@
     mov cx, 64
     xor ax, ax
     rep stosw
+
+    mov word [es:wArenaBase], TRN_ARENA_START
+    mov word [es:wArenaPtr], TRN_ARENA_START
+    mov word [es:wArenaLimit], TRN_ARENA_END
+    mov word [es:TRN_ARENA_END], 0xA55A
 
     mov ax, word [resState + RES_STATE.bDosMajor]
     mov word [es:bTrnDosMajor], ax

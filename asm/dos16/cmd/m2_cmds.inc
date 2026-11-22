@@ -183,11 +183,41 @@
 @proc cmd_dir
     push bp
     mov bp, TRN_CMD_WORK
-    ; Scratch layout in arena:
-    ; [bp + 0..127]   = pattern string
+    ; Scratch layout in TRN_CMD_WORK:
+    ; [bp + 0..63]    = DOS search spec
+    ; [bp + 64..125]  = optional DP glob filter pattern (empty if none)
+    ; [bp + 126]      = /B bare output flag
     ; [bp + 128..191] = XFCB / DISK_ID4 / EXT_FREE_SPACE
     ; [bp + 192..271] = 64B DTA / u64 free buf
     ; [bp + 272..600] = 318B WIN32_FIND_DATAA (DOS 7.x) or 1024B FAT12 sector buf (DOS 1.25)
+    mov byte [bp + 64], 0
+    mov byte [bp + 126], 0
+
+.dir_sw_lp:
+    call trn_skip_ws
+    cmp al, '/'
+    jne .dir_rd_pat
+    mov ah, byte [si + 1]
+    and ah, 0xDF
+    cmp ah, 'B'
+    jne .dir_sk_sw
+    mov byte [bp + 126], 1
+.dir_sk_sw:
+    add si, 2
+.dir_sk_sw_ch:
+    mov al, byte [si]
+    test al, al
+    jz .dir_rd_pat
+    cmp al, 0x0D
+    je .dir_rd_pat
+    cmp al, 0x20
+    je .dir_sw_lp
+    cmp al, '/'
+    je .dir_sw_lp
+    inc si
+    jmp .dir_sk_sw_ch
+
+.dir_rd_pat:
     mov di, bp
     call trn_read_arg
     jnc .has_pat
@@ -195,14 +225,61 @@
     mov byte [bp + 1], '.'
     mov byte [bp + 2], '*'
     mov byte [bp + 3], 0
-.has_pat:
+    jmp .pat_ready
 
+.has_pat:
+    ; If bare leaf wildcard (no '\', '/', ':') contains '*' or '?' on DOS 2.00+, copy pattern to
+    ; [bp + 64] and enumerate "*.*" through matches_win32_glob so multi-'*' patterns work!
+    cmp byte [bTrnDosMajor], 2
+    jb .pat_ready
+    mov si, bp
+    xor cx, cx
+.chk_wild_leaf:
+    mov al, byte [si]
+    test al, al
+    jz .done_wild_chk
+    cmp al, 0x5C
+    je .pat_ready
+    cmp al, '/'
+    je .pat_ready
+    cmp al, ':'
+    je .pat_ready
+    cmp al, '*'
+    je .mark_wild
+    cmp al, '?'
+    jne .nx_wild_ch
+.mark_wild:
+    mov cx, 1
+.nx_wild_ch:
+    inc si
+    jmp .chk_wild_leaf
+.done_wild_chk:
+    test cx, cx
+    jz .pat_ready
+    mov si, bp
+    mov di, bp
+    add di, 64
+.cp_dp_pat:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_dp_pat
+    mov byte [bp], '*'
+    mov byte [bp + 1], '.'
+    mov byte [bp + 2], '*'
+    mov byte [bp + 3], 0
+
+.pat_ready:
     cmp byte [bTrnDosMajor], 2
     jae .dir_ge200
     jmp .dir_dos125
 .dir_ge200:
 
-    ; On DOS 4.00+, query and print 32-bit Volume Serial Number (XXXX-XXXX) if present
+    ; On DOS 4.00+, query and print 32-bit Volume Serial Number (XXXX-XXXX) unless /B bare mode
+    cmp byte [bp + 126], 0
+    jne .chk_dos7_lfn
     cmp byte [bTrnDosMajor], 4
     jb .chk_dos7_lfn
     mov bl, 0
@@ -228,14 +305,17 @@
 
 .chk_dos7_lfn:
     cmp byte [bTrnDosMajor], 7
-    jb .dir_dos200
+    jb .j_dir_dos200
     push es
     mov es, word [wTrnResSeg]
     mov al, byte [es:resState + RES_STATE.bHwFlags]
     pop es
     test al, HW_LFN_VOL
-    jz .dir_dos200
+    jnz .do_dir_lfn
+.j_dir_dos200:
+    jmp .dir_dos200
 
+.do_dir_lfn:
     ; --- MS-DOS 7.x Long Filename Enumeration (AX=714Eh / 714Fh / 71A1h) ---
     mov dx, bp
     mov di, bp
@@ -246,9 +326,23 @@
     jmp .not_found
 .got_lfn_hdl:
     mov bx, ax
+    mov word [bp + 124], 0 ; matched count
 
 .lfn_lp:
     push bx
+    cmp byte [bp + 64], 0
+    je .lfn_match_ok
+    mov si, bp
+    add si, 64
+    mov di, bp
+    add di, (272 + WIN32_FIND_DATAA.cFileName)
+    call matches_win32_glob
+    jnc .lfn_match_ok
+    jmp .lfn_next_item
+.lfn_match_ok:
+    inc word [bp + 124]
+    cmp byte [bp + 126], 0
+    jne .prt_lfn_full
     mov si, bp
     add si, (272 + WIN32_FIND_DATAA.cAlternateFileName)
     cmp byte [si], 0
@@ -271,14 +365,25 @@
     call con_write_asciiz
     call con_write_crlf
 
+.lfn_next_item:
     pop bx
     mov di, bp
     add di, 272
     call k700_find_next
-    jnc .lfn_lp
+    jc .lfn_done_lp
+    jmp .lfn_lp
+.lfn_done_lp:
 
     ; Mandatory FindClose (AX=71A1h) so Win9x search handle never leaks!
     call k700_find_close
+    cmp word [bp + 124], 0
+    jne .lfn_after_close
+    jmp .not_found
+.lfn_after_close:
+    cmp byte [bp + 126], 0
+    je .lfn_free_sp
+    jmp .j_done_dir
+.lfn_free_sp:
 
     ; Try FAT32 >2 GiB free space (AX=7303h), falling back to k400_free_space64
     mov dx, addr(szCurRoot)
@@ -297,23 +402,45 @@
     add di, 192
     mov cx, 0x0016
     call k200_find_first
-    jnc .dta_lp
+    jnc .dta_init
     jmp .not_found
+.dta_init:
+    mov word [bp + 124], 0
 
 .dta_lp:
+    cmp byte [bp + 64], 0
+    je .dta_match_ok
+    mov si, bp
+    add si, 64
+    mov di, bp
+    add di, (192 + DTA_FIND.szName)
+    call matches_win32_glob
+    jc .dta_next_item
+.dta_match_ok:
+    inc word [bp + 124]
     mov si, bp
     add si, (192 + DTA_FIND.szName)
     call con_write_asciiz
+    cmp byte [bp + 126], 0
+    jne .dta_eol
     test byte [bp + 192 + DTA_FIND.bAttr], ATTR_DIRECTORY
     jz .dta_eol
     mov si, addr(szDirTag)
     call con_write_asciiz
 .dta_eol:
     call con_write_crlf
+.dta_next_item:
     mov di, bp
     add di, 192
     call k200_find_next
     jnc .dta_lp
+
+    cmp word [bp + 124], 0
+    jne .dta_chk_bare
+    jmp .not_found
+.dta_chk_bare:
+    cmp byte [bp + 126], 0
+    jne .j_done_dir
 
 .free_200_400:
     xor dl, dl
@@ -413,6 +540,15 @@
     jnc .type_arg_ok
     jmp .syn_err
 .type_arg_ok:
+    mov si, bp
+    call dev_match_name
+    jc .type_not_nul
+    cmp al, DEV_NUL
+    jne .type_not_nul
+    mov word [wTrnExitCode], 0
+    pop bp
+    ret
+.type_not_nul:
 
     cmp byte [bTrnDosMajor], 2
     jae .type_ge200
@@ -558,7 +694,9 @@
 .cp_args_ok:
 
     cmp byte [bTrnDosMajor], 2
-    jb .copy_125
+    jae .cp_ge200
+    jmp .copy_125
+.cp_ge200:
 
     mov dx, bp
     xor al, al
@@ -689,12 +827,46 @@
 @proc cmd_del
     push bp
     mov bp, TRN_CMD_WORK
+    mov byte [bp + 250], 0 ; /F force read-only flag
+
+.del_sw_lp:
+    call trn_skip_ws
+    cmp al, '/'
+    jne .del_rd_arg
+    mov ah, byte [si + 1]
+    and ah, 0xDF
+    cmp ah, 'F'
+    jne .del_nx_sw
+    mov byte [bp + 250], 1
+.del_nx_sw:
+    add si, 2
+.del_sk_sw:
+    mov al, byte [si]
+    test al, al
+    jz .del_rd_arg
+    cmp al, 0x0D
+    je .del_rd_arg
+    cmp al, 0x20
+    je .del_sw_lp
+    cmp al, '/'
+    je .del_sw_lp
+    inc si
+    jmp .del_sk_sw
+
+.del_rd_arg:
     mov di, bp
     call trn_read_arg
     jc .syn_err
 
     cmp byte [bTrnDosMajor], 2
     jb .del_125
+    cmp byte [bp + 250], 0
+    je .del_do200
+    mov dx, bp
+    xor cx, cx
+    mov ax, 0x4301
+    int 0x21
+.del_do200:
     mov dx, bp
     mov si, 1
     call k700_delete
@@ -773,16 +945,63 @@
 ;; @proc cmd_mkdir
 ;; @abi dos16
 ;; @in DS:SI = directory path
-;; @out Creates directory via k700_mkdir / k200_mkdir (rejects on DOS 1.25!)
+;; @out Creates directory (plus intermediate parents when /E:ON!) via k700_mkdir / k200_mkdir
 ;; @err Prints Path not found on DOS 1.25 or syntax/path error
 ;; @clobbers ax, bx, cx, dx, si, di
-;; @desc Implements MD / MKDIR across MS-DOS 1.25..8.0.
+;; @desc Implements MD / MKDIR across MS-DOS 1.25..8.0 with /E:ON parent creation.
 @proc cmd_mkdir
     push bp
     mov bp, TRN_CMD_WORK
     mov di, bp
     call trn_read_arg
     jc .syn_err
+
+    cmp byte [bTrnDosMajor], 2
+    jb .md_single
+
+    push es
+    mov es, word [wTrnResSeg]
+    mov al, byte [es:resState + RES_STATE.bCmdExt]
+    pop es
+    test al, al
+    jz .md_single
+
+    ; Walk internal '\' or '/' separators and pre-create parent prefixes!
+    mov si, bp
+    cmp byte [si + 1], ':'
+    jne .md_walk_st
+    add si, 2
+.md_walk_st:
+    cmp byte [si], 0x5C
+    je .md_skip_root
+    cmp byte [si], '/'
+    jne .md_p_lp
+.md_skip_root:
+    inc si
+.md_p_lp:
+    mov al, byte [si]
+    test al, al
+    jz .md_single
+    cmp al, 0x5C
+    je .md_mk_pfx
+    cmp al, '/'
+    je .md_mk_pfx
+    inc si
+    jmp .md_p_lp
+.md_mk_pfx:
+    push si
+    mov al, byte [si]
+    push ax
+    mov byte [si], 0
+    mov dx, bp
+    call k700_mkdir
+    pop ax
+    pop si
+    mov byte [si], al
+    inc si
+    jmp .md_p_lp
+
+.md_single:
     mov dx, bp
     call k700_mkdir
     jc .err_out
@@ -799,7 +1018,7 @@
 
 ;; @proc cmd_rmdir
 ;; @abi dos16
-;; @in DS:SI = directory path
+;; @in DS:SI = optional [/S] [/Q] directory path
 ;; @out Removes directory via k700_rmdir / k200_rmdir
 ;; @err Prints diagnostic on failure
 ;; @clobbers ax, bx, cx, dx, si, di
@@ -807,6 +1026,13 @@
 @proc cmd_rmdir
     push bp
     mov bp, TRN_CMD_WORK
+.rd_sw_lp:
+    call trn_skip_ws
+    cmp al, '/'
+    jne .rd_get_arg
+    add si, 2
+    jmp .rd_sw_lp
+.rd_get_arg:
     mov di, bp
     call trn_read_arg
     jc .syn_err
@@ -929,7 +1155,13 @@
     add di, 128
     xor cl, cl
     call k700_truename
+    jnc .tn_ok
+    mov si, bp
+    mov di, bp
+    add di, 128
+    call path_normalize
     jc .err_out
+.tn_ok:
     mov si, bp
     add si, 128
     call con_write_asciiz
@@ -1447,162 +1679,280 @@
     ret
 @endproc
 
+;; @proc trn_try_bat_cand
+;; @abi dos16
+;; @in DS:SI = candidate .BAT/.CMD path, [bp + 390] = arg_tail
+;; @out Opens, verifies, closes, and pushes batch frame, CF=0; or CF=1 if file missing
+;; @err CF=1 on missing file or batch stack overflow (AX = ERR_*)
+;; @clobbers ax, bx, cx, dx, si, di
+;; @desc Probes whether DS:SI exists and pushes it onto resident batchResStack with 0 open handles.
+@proc trn_try_bat_cand
+    push si
+    cmp byte [bTrnDosMajor], 2
+    jb .bat125
+    mov dx, si
+    xor al, al
+    call k200_open
+    jc .missing
+    mov bx, ax
+    call k200_close
+    pop si
+    mov bx, word [bp + 390]
+    call trn_push_batch_frame
+    ret
+.bat125:
+    mov di, bp
+    add di, 260
+    call k125_open
+    jc .missing
+    mov di, bp
+    add di, 260
+    call k125_close
+    pop si
+    mov bx, word [bp + 390]
+    call trn_push_batch_frame
+    ret
+.missing:
+    pop si
+    mov ax, ERR_BAD_COMMAND
+    stc
+    ret
+@endproc
+
+;; @proc trn_try_stem_launch
+;; @abi dos16
+;; @in DS:BP = candidate command path/stem, [bp + 390] = arg_tail
+;; @out Launches explicit .BAT/.CMD/.COM/.EXE or probes .COM -> .EXE -> .BAT -> .CMD, CF=0
+;; @err CF=1 if no matching program or script exists at DS:BP
+;; @clobbers ax, bx, cx, dx, si, di
+;; @desc Probes one directory stem across .COM, .EXE, .BAT, and .CMD in PATHEXT precedence order.
+@proc trn_try_stem_launch
+    mov si, bp
+    mov di, addr(szExtBat)
+    call trn_has_ext
+    jnc .exp_bat
+    mov si, bp
+    mov di, addr(szExtCmd)
+    call trn_has_ext
+    jnc .exp_bat
+
+    mov si, bp
+    mov di, addr(szExtCom)
+    call trn_has_ext
+    jnc .exp_bin
+    mov si, bp
+    mov di, addr(szExtExe)
+    call trn_has_ext
+    jnc .exp_bin
+
+    mov si, addr(szExtCom)
+    call trn_build_cand
+    mov bx, bp
+    add bx, 128
+    mov si, word [bp + 390]
+    call trn_spawn_prog
+    jnc .done_ok
+
+    mov si, addr(szExtExe)
+    call trn_build_cand
+    mov bx, bp
+    add bx, 128
+    mov si, word [bp + 390]
+    call trn_spawn_prog
+    jnc .done_ok
+
+    mov si, addr(szExtBat)
+    call trn_build_cand
+    mov si, bp
+    add si, 128
+    call trn_try_bat_cand
+    jnc .done_ok
+
+    mov si, addr(szExtCmd)
+    call trn_build_cand
+    mov si, bp
+    add si, 128
+    call trn_try_bat_cand
+    ret
+
+.exp_bin:
+    mov bx, bp
+    mov si, word [bp + 390]
+    call trn_spawn_prog
+    ret
+
+.exp_bat:
+    mov si, bp
+    call trn_try_bat_cand
+.done_ok:
+    ret
+@endproc
+
 ;; @proc trn_exec_external
 ;; @abi dos16
 ;; @in DS:SI = command line starting at external command token
-;; @out Resolves explicit or .COM/.EXE/.BAT extension and launches program or batch frame
+;; @out Searches CWD (unless %NoDefaultCurrentDirectoryInExePath% set) then %PATH% for .COM/.EXE/.BAT/.CMD
 ;; @err Prints Bad command or file name and sets [wTrnExitCode]=1 if not found
 ;; @clobbers ax, bx, cx, dx, si, di
-;; @desc Searches CWD for .COM, .EXE, or .BAT and dispatches to child loader or batch stack.
+;; @desc Resolves external commands across CWD and semicolon-separated %PATH% directories.
 @proc trn_exec_external
     push bp
     mov bp, TRN_CMD_WORK
     add bp, 640
+    ; [bp + 0..127]   = active stem
+    ; [bp + 128..255] = stem + .EXT
+    ; [bp + 260..380] = DOS 1.25 FCB work
+    ; [bp + 390]      = arg_tail
+    ; [bp + 392..519] = raw command token
+    ; [bp + 520..775] = %PATH% value buffer
     mov di, bp
+    add di, 392
     call trn_read_arg
     jnc .ext_arg_ok
     jmp .bad_cmd
 .ext_arg_ok:
-    mov dx, si
-    mov word [bp + 390], dx
+    mov word [bp + 390], si
 
-    ; Check if explicit .BAT, .COM, or .EXE extension was typed
-    push dx
+    ; Check if command token contains '\', '/', or ':' (explicit path -> do not search %PATH%)
     mov si, bp
-    mov di, addr(szExtBat)
-    call trn_has_ext
-    pop dx
-    jc .not_exp_bat
-    jmp .launch_bat
-.not_exp_bat:
+    add si, 392
+    xor dx, dx
+.chk_qual:
+    mov al, byte [si]
+    test al, al
+    jz .qual_done
+    cmp al, 0x5C
+    je .mark_qual
+    cmp al, '/'
+    je .mark_qual
+    cmp al, ':'
+    jne .nx_qual
+.mark_qual:
+    mov dx, 1
+.nx_qual:
+    inc si
+    jmp .chk_qual
+.qual_done:
+    test dx, dx
+    jz .not_qual_cmd
+    jmp .try_cwd_only
+.not_qual_cmd:
 
-    push dx
+    ; Bare command: check %NoDefaultCurrentDirectoryInExePath% before searching CWD!
+    mov si, addr(szNoDefCwdExe)
+    mov cx, 34
+    mov di, bp
+    add di, 520
+    call env_get_var
+    jnc .walk_path_env
+
+    ; Try CWD first
     mov si, bp
-    mov di, addr(szExtCom)
-    call trn_has_ext
-    pop dx
-    jnc .j_direct_bin
-
-    push dx
-    mov si, bp
-    mov di, addr(szExtExe)
-    call trn_has_ext
-    pop dx
-    jc .try_cands
-.j_direct_bin:
-    jmp .try_direct_bin
-
-.try_cands:
-    ; Append .COM -> .EXE -> .BAT in [bp + 128] and try each in order
-    mov si, addr(szExtCom)
-    call trn_build_cand
-    push dx
-    mov bx, bp
-    add bx, 128
-    mov si, dx
-    call trn_spawn_prog
-    pop dx
-    jc .try_cand_exe
+    add si, 392
+    mov di, bp
+.cp_cwd_tok:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_cwd_tok
+    call trn_try_stem_launch
+    jc .walk_path_env
     jmp .ok_done
 
-.try_cand_exe:
-    mov si, addr(szExtExe)
-    call trn_build_cand
-    push dx
-    mov bx, bp
-    add bx, 128
-    mov si, dx
-    call trn_spawn_prog
-    pop dx
-    jc .try_cand_bat
-    jmp .ok_done
-
-.try_cand_bat:
-    mov si, addr(szExtBat)
-    call trn_build_cand
-    ; Verify .BAT exists before pushing batch frame
-    cmp byte [bTrnDosMajor], 2
-    jb .chk_bat125
-    mov dx, bp
-    add dx, 128
-    xor al, al
-    call k200_open
-    jc .j_bad_cmd1
-    mov bx, ax
-    call k200_close
-    mov si, bp
-    add si, 128
-    mov bx, word [bp + 390]
-    call trn_push_batch_frame
-    jc .j_err_ax1
-    jmp .ok_done
-
-.j_bad_cmd1:
+.walk_path_env:
+    mov si, addr(szKwPath)
+    mov cx, 4
+    mov di, bp
+    add di, 520
+    call env_get_var
+    jnc .have_path_env
     jmp .bad_cmd
-.j_err_ax1:
-    jmp .err_ax
-
-.chk_bat125:
+.have_path_env:
     mov si, bp
-    add si, 128
-    mov di, bp
-    add di, 260
-    call k125_open
-    jc .bad_cmd
-    mov di, bp
-    add di, 260
-    call k125_close
-    mov si, bp
-    add si, 128
-    mov bx, word [bp + 390]
-    call trn_push_batch_frame
-    jc .err_ax
-    jmp .ok_done
+    add si, 520
 
-.try_direct_bin:
-    mov bx, bp
-    mov si, dx
-    call trn_spawn_prog
+.path_seg_lp:
+    cmp byte [si], ';'
+    jne .chk_p_end
+    inc si
+    jmp .path_seg_lp
+.chk_p_end:
+    cmp byte [si], 0
+    je .bad_cmd
+
+    ; Copy next ';'-delimited directory (stripping '"') into [bp + 0]
+    mov di, bp
+    xor cx, cx
+.cp_pdir:
+    mov al, byte [si]
+    test al, al
+    jz .end_pdir
+    cmp al, ';'
+    je .adv_psemi
+    inc si
+    cmp al, '"'
+    je .cp_pdir
+    mov byte [di], al
+    inc di
+    inc cx
+    cmp cx, 80
+    jb .cp_pdir
+    jmp .end_pdir
+.adv_psemi:
+    inc si
+.end_pdir:
+    test cx, cx
+    jz .path_seg_lp
+    push si ; save %PATH% cursor!
+
+    mov al, byte [di - 1]
+    cmp al, 0x5C
+    je .app_cmd_tok
+    cmp al, '/'
+    je .app_cmd_tok
+    cmp al, ':'
+    je .app_cmd_tok
+    mov byte [di], 0x5C
+    inc di
+.app_cmd_tok:
+    mov si, bp
+    add si, 392
+.cp_ptok:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_ptok
+
+    call trn_try_stem_launch
+    pop si
     jnc .ok_done
-    jmp .bad_cmd
+    jmp .path_seg_lp
 
-.launch_bat:
-    cmp byte [bTrnDosMajor], 2
-    jb .chk_exp_bat125
-    mov dx, bp
-    xor al, al
-    call k200_open
-    jc .bad_cmd
-    mov bx, ax
-    call k200_close
+.try_cwd_only:
     mov si, bp
-    mov bx, word [bp + 390]
-    call trn_push_batch_frame
-    jc .err_ax
-    jmp .ok_done
-
-.chk_exp_bat125:
-    mov si, bp
+    add si, 392
     mov di, bp
-    add di, 260
-    call k125_open
-    jc .bad_cmd
-    mov di, bp
-    add di, 260
-    call k125_close
-    mov si, bp
-    mov bx, word [bp + 390]
-    call trn_push_batch_frame
-    jc .err_ax
-
-.ok_done:
-    pop bp
-    ret
+.cp_qtok:
+    mov al, byte [si]
+    mov byte [di], al
+    inc si
+    inc di
+    test al, al
+    jnz .cp_qtok
+    call trn_try_stem_launch
+    jnc .ok_done
 
 .bad_cmd:
     mov ax, ERR_BAD_COMMAND
-.err_ax:
     call trn_err_dos
+    pop bp
+    ret
+
+.ok_done:
     pop bp
     ret
 @endproc
@@ -1942,6 +2292,7 @@
     mov es, word [wTrnResSeg]
     mov byte [es:resState + RES_STATE.bBatchDepth], 0
     pop es
+    call env_unwind_batch_locals
     pop bp
     stc
     ret
@@ -1971,3 +2322,5 @@
 @data db szExtCom, ".COM", 0
 @data db szExtExe, ".EXE", 0
 @data db szExtBat, ".BAT", 0
+@data db szExtCmd, ".CMD", 0
+@data db szNoDefCwdExe, "NoDefaultCurrentDirectoryInExePath", 0

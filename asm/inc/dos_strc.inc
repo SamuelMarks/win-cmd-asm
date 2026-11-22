@@ -194,7 +194,10 @@
     @field bMsgResident, byte, 1
     @field bCtrlBreakLatched, byte, 1
     @field bBatchDepth, byte, 1
-    @field wReservedPad, word, 3
+    @field wSetlocalTop, word, 1
+    @field wPushdTop, word, 1
+    @field bSetlocalCnt, byte, 1
+    @field bColorAttr, byte, 1
     @field szComspec, byte, 80
 @endstruc
 
