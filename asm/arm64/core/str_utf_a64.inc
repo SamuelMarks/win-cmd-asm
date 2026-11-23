@@ -151,14 +151,19 @@
 ;; @clobbers x0, x1, x2, x3
 ;; @desc Copies x2 bytes forward from x1 to x0, returning x0 + x2.
 @proc mem_copy_a64
-.lp:
+.q_lp:
+    cmp x2, #8
+    b.lo .b_lp
+    ldr x3, [x1], #8
+    str x3, [x0], #8
+    sub x2, x2, #8
+    b .q_lp
+.b_lp:
     cbz x2, .done
-    ldrb w3, [x1, #0]
-    strb w3, [x0, #0]
-    add x1, x1, #1
-    add x0, x0, #1
+    ldrb w3, [x1], #1
+    strb w3, [x0], #1
     sub x2, x2, #1
-    b .lp
+    b .b_lp
 .done:
     ret
 @endproc
@@ -169,14 +174,19 @@
 ;; @out Fills x1 bytes at x0 with 0
 ;; @err none
 ;; @clobbers x0, x1
-;; @desc Zero-fills x1 bytes starting at x0.
+;; @desc Zero-fills x1 bytes starting at x0 using 16-byte STP XZR, XZR stores.
 @proc mem_zero_a64
-.lp:
+.p_lp:
+    cmp x1, #16
+    b.lo .z_tail
+    stp xzr, xzr, [x0], #16
+    sub x1, x1, #16
+    b .p_lp
+.z_tail:
     cbz x1, .done
-    strb wzr, [x0, #0]
-    add x0, x0, #1
+    strb wzr, [x0], #1
     sub x1, x1, #1
-    b .lp
+    b .z_tail
 .done:
     ret
 @endproc
@@ -437,7 +447,7 @@
 ;; @proc parse_signed_dec_a64
 ;; @abi win_arm64
 ;; @in x0 = ASCII string
-;; @out w0 = signed 32-bit value, x1 = pointer to first non-digit
+;; @out x0 = signed 64-bit value (w0 = low 32 bits), x1 = pointer to first non-digit
 ;; @err none
 ;; @clobbers x0, x1, x2, x3, x4
 ;; @desc Parses an optional `+/-` sign followed by base-10 digits.
@@ -455,20 +465,21 @@
     b.ne .digs
     add x1, x1, #1
 .digs:
-    mov w0, #0
-    mov w3, #10
+    mov x0, #0
+    mov x3, #10
 .lp:
     ldrb w2, [x1, #0]
     sub w2, w2, #0x30
     cmp w2, #10
     b.hs .fin
-    mul w0, w0, w3
-    add w0, w0, w2
+    uxtw x2, w2
+    mul x0, x0, x3
+    add x0, x0, x2
     add x1, x1, #1
     b .lp
 .fin:
     cbz w4, .done
-    neg w0, w0
+    neg x0, x0
 .done:
     ret
 @endproc
@@ -706,6 +717,35 @@
     add x20, x0, #1
     mov x0, x20
     bl arena_alloc_a64
+    cbz x0, .done
+    mov x20, x0
+    mov x1, x19
+    bl str_copy_a64
+    mov x0, x20
+.done:
+    ldp x19, x20, [sp], #16
+    ldp x29, x30, [sp], #16
+    hint #29
+    ret
+@endproc
+
+;; @proc perm_strdup_a64
+;; @abi win_arm64
+;; @in x0 = WTF-8 string pointer
+;; @out x0 = duplicated WTF-8 string in persistent pool
+;; @err x0 = 0 on OOM
+;; @clobbers x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15, x16, x17
+;; @desc Duplicates a NUL-terminated string into the persistent pool for batch frames, PUSHD, and DOSKEY.
+@proc perm_strdup_a64
+    hint #25
+    stp x29, x30, [sp, #-16]!
+    stp x19, x20, [sp, #-16]!
+    mov x29, sp
+    mov x19, x0
+    bl str_len_a64
+    add x20, x0, #1
+    mov x0, x20
+    bl perm_alloc_a64
     cbz x0, .done
     mov x20, x0
     mov x1, x19
@@ -1112,8 +1152,7 @@
 ;; @out Writes CRLF to FD 1 (stdout)
 ;; @err none
 ;; @clobbers x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15, x16, x17
-;; @desc Emits `
-` to FD 1.
+;; @desc Emits CRLF to FD 1.
 @proc out_crlf_a64
     hint #25
     stp x29, x30, [sp, #-16]!
@@ -1147,7 +1186,7 @@
     mov_imm32 w1, ERR_INVALID_NUMBER
     cmp w0, w1
     b.eq .inv
-    mov_imm32 w1, ERR_CMD_NOT_RECOGNIZED
+    mov_imm32 w1, ERR_BAD_COMMAND
     cmp w0, w1
     b.eq .bad
     mov w0, #STR_OFF_SYNTAX_ERR

@@ -6,6 +6,7 @@ members = [
     "tools/asm-lint",
     "tools/emu-cov",
     "tools/diff-fuzz",
+    "tools/media-pkg",
 ]
 
 [workspace.package]

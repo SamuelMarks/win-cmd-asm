@@ -1,4 +1,4 @@
-;; @file wincmd_pif.asm
+;; @file w16_pif.asm
 ;; @isa 8086
 ;; @desc Authentic 545-byte Windows 1.0..3.2 WINOLDAP PIF (369B std + WINDOWS 286 3.0 + WINDOWS 386 3.0).
 

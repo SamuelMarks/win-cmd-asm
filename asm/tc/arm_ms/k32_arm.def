@@ -1,6 +1,7 @@
 LIBRARY KERNEL32.dll
 EXPORTS
 CloseHandle
+CompareFileTime
 CopyFileExW
 CopyFileW
 CreateDirectoryW
@@ -9,6 +10,7 @@ CreateHardLinkW
 CreatePipe
 CreateProcessW
 CreateSymbolicLinkW
+CreateThread
 DeleteFileW
 DeviceIoControl
 DuplicateHandle
@@ -29,6 +31,8 @@ GetACP
 GetCPInfo
 GetCommandLineA
 GetCommandLineW
+GetComputerNameExW
+GetComputerNameW
 GetConsoleCP
 GetConsoleMode
 GetConsoleOutputCP
@@ -63,6 +67,7 @@ GetTickCount
 GetVersion
 GetVersionExW
 GetVolumeInformationW
+GlobalMemoryStatusEx
 LoadLibraryA
 LoadLibraryW
 LocalFileTimeToFileTime

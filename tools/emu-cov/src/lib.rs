@@ -6,13 +6,15 @@ use core::fmt::Write as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use wincmd_diag::{ErrCode, ToolError};
 
 pub mod arm32_pe;
+pub mod arm64_pe;
 pub mod dos_syscalls;
 pub mod win16_ne;
 pub mod win_mock;
+pub mod x86_pe;
 use dos_syscalls::{CON_IN_SENTINEL, CON_OUT_SENTINEL, LfnSearchState, NUL_SENTINEL, VfsMeta};
 pub use win16_ne::{Win16Era, Win16State};
 
@@ -80,6 +82,8 @@ pub mod flags {
 /// Recorded execution and branch-edge coverage telemetry.
 #[derive(Clone, Debug, Default)]
 pub struct CoverageData {
+    /// When true, per-instruction PC and branch-edge insertions are skipped (fast fuzzing mode).
+    pub disabled: bool,
     /// Set of linear 20-bit instruction addresses executed at least once.
     pub executed_pcs: BTreeSet<u32>,
     /// Conditional branch outcomes keyed by linear instruction address: `(seen_taken, seen_not_taken)`.
@@ -87,6 +91,41 @@ pub struct CoverageData {
 }
 
 impl CoverageData {
+    /// Converts a 32-bit or 64-bit PE execution trace (`executed_pcs`, `branch_edges`) into [`CoverageData`].
+    #[must_use]
+    pub fn from_pe_trace(
+        pcs: impl IntoIterator<Item = u64>,
+        edges: impl IntoIterator<Item = (u64, bool)>,
+    ) -> Self {
+        let mut cov = Self::default();
+        for pc in pcs {
+            let _ = cov
+                .executed_pcs
+                .insert(u32::try_from(pc & 0xFFFF_FFFF).unwrap_or(0));
+        }
+        for (pc, taken) in edges {
+            let key = u32::try_from(pc & 0xFFFF_FFFF).unwrap_or(0);
+            let entry = cov.branch_edges.entry(key).or_insert((false, false));
+            if taken {
+                entry.0 = true;
+            } else {
+                entry.1 = true;
+            }
+        }
+        cov
+    }
+
+    /// Merges another [`CoverageData`] run into `self`, accumulating both `executed_pcs`
+    /// and `(taken, not_taken)` conditional-branch edges across test workloads.
+    pub fn merge(&mut self, other: &Self) {
+        self.executed_pcs.extend(other.executed_pcs.iter().copied());
+        for (&pc, &(t, nt)) in &other.branch_edges {
+            let entry = self.branch_edges.entry(pc).or_insert((false, false));
+            entry.0 |= t;
+            entry.1 |= nt;
+        }
+    }
+
     /// Total observed conditional branch Half-Edges (`2` per encountered conditional branch).
     #[must_use]
     pub fn total_branch_edges(&self) -> usize {
@@ -102,7 +141,36 @@ impl CoverageData {
             .sum()
     }
 
-    /// Renders an LCOV tracefile (`TN:` / `SF:` / `DA:` / `BRDA:` / `end_of_record`).
+    /// Verifies that observed conditional branches achieve at least `required_bps` (`10_000` = `100.00%`)
+    /// taken + not-taken edge coverage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::Coverage`] if branch-edge coverage falls below `required_bps`.
+    pub fn verify_branch_coverage(
+        &self,
+        scope: &str,
+        required_bps: u32,
+    ) -> Result<(), ToolError> {
+        let total = self.total_branch_edges();
+        if total == 0 {
+            return Ok(());
+        }
+        let covered = self.covered_branch_edges();
+        let bps = u32::try_from((covered * 10_000) / total).unwrap_or(0);
+        if bps < required_bps {
+            return Err(ToolError::Coverage {
+                scope: scope.to_owned(),
+                covered,
+                total,
+                percent_bps: bps,
+                required_bps,
+            });
+        }
+        Ok(())
+    }
+
+    /// Renders an LCOV tracefile (`TN:` / `SF:` / `DA:` / `BRDA:` / `BRF:` / `BRH:` / `end_of_record`).
     #[must_use]
     pub fn to_lcov(&self, source_name: &str) -> String {
         const LF: char = 10 as char;
@@ -119,6 +187,8 @@ impl CoverageData {
             let _ = writeln!(out, "BRDA:{pc},0,0,{t_cnt}");
             let _ = writeln!(out, "BRDA:{pc},0,1,{nt_cnt}");
         }
+        let _ = writeln!(out, "BRF:{}", self.total_branch_edges());
+        let _ = writeln!(out, "BRH:{}", self.covered_branch_edges());
         let _ = writeln!(out, "LF:{}", self.executed_pcs.len());
         let _ = writeln!(out, "LH:{}", self.executed_pcs.len());
         out.push_str("end_of_record");
@@ -2855,8 +2925,73 @@ enum RmAddr {
     Mem(u16, u16),
 }
 
+fn run_pe_cli<W: Write>(
+    path: &Path,
+    cmd_tail: &str,
+    lcov_out: Option<&Path>,
+    out: &mut W,
+) -> Result<VmRunResult, ToolError> {
+    let pe = fs::read(path)?;
+    if pe.len() < 0x80 || &pe[0..2] != b"MZ" {
+        return Err(win_mock::emu_err(0, ErrCode::BadExeFormat, "invalid PE file"));
+    }
+    let lfa = usize::try_from(u32::from_le_bytes([pe[0x3C], pe[0x3D], pe[0x3E], pe[0x3F]]))
+        .unwrap_or(0);
+    let machine = u16::from_le_bytes([
+        *pe.get(lfa + 4).unwrap_or(&0),
+        *pe.get(lfa + 5).unwrap_or(&0),
+    ]);
+    let shared = std::rc::Rc::new(std::cell::RefCell::new(win_mock::SharedWinEnv::new(
+        machine == 0x01C0,
+    )));
+    let (exit_code, stdout, stderr, steps, cov) = match machine {
+        0x014C | 0x8664 => {
+            let mut vm = x86_pe::X86PeVm::from_pe_bytes(&pe, cmd_tail, &[], shared)?;
+            let r = vm.run(25_000_000)?;
+            let c = CoverageData::from_pe_trace(r.executed_pcs, r.branch_edges);
+            (r.exit_code, r.stdout, r.stderr, r.steps, c)
+        }
+        0x01C0 | 0x01C2 | 0x01C4 => {
+            let mut vm = arm32_pe::Arm32Vm::from_pe_bytes(&pe, cmd_tail, &[], shared)?;
+            let r = vm.run(25_000_000)?;
+            (r.exit_code, r.stdout, r.stderr, r.steps, r.coverage)
+        }
+        0xAA64 => {
+            let mut vm = arm64_pe::Arm64Vm::from_pe_bytes(&pe, cmd_tail, &[], shared)?;
+            let r = vm.run(25_000_000)?;
+            (r.exit_code, r.stdout, r.stderr, r.steps, r.coverage)
+        }
+        other => {
+            return Err(win_mock::emu_err(
+                0,
+                ErrCode::BadExeFormat,
+                format!("unsupported PE machine 0x{other:04X}"),
+            ));
+        }
+    };
+    if let Some(lcov_file) = lcov_out {
+        fs::write(lcov_file, cov.to_lcov(&path.to_string_lossy()))?;
+    }
+    writeln!(
+        out,
+        "emu-cov: `{}` exited with {} in {} steps ({} PCs, {}/{} branch edges)",
+        path.display(),
+        exit_code,
+        steps,
+        cov.executed_pcs.len(),
+        cov.covered_branch_edges(),
+        cov.total_branch_edges()
+    )?;
+    Ok(VmRunResult {
+        exit_code: u8::try_from(exit_code & 0xFF).unwrap_or(0),
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
+        steps,
+    })
+}
+
 /// Runs the `emu-cov` CLI:
-/// `emu-cov --com <path.com> [--era 1.25|2.00|4.00|7.10] [--args "..."] [--lcov <out.info>]`
+/// `emu-cov (--com <path.com> | --pe <path.exe>) [--era 1.25|2.00|4.00|7.10] [--args "..."] [--lcov <out.info>]`
 ///
 /// # Errors
 ///
@@ -2869,6 +3004,7 @@ where
 {
     let cli_items: Vec<String> = args.into_iter().map(|s| s.as_ref().to_owned()).collect();
     let mut com_path: Option<PathBuf> = None;
+    let mut pe_path: Option<PathBuf> = None;
     let mut era = DosEra::Dos400;
     let mut cmd_tail = String::new();
     let mut lcov_out: Option<PathBuf> = None;
@@ -2881,6 +3017,7 @@ where
         })?;
         match flag {
             "--com" => com_path = Some(PathBuf::from(val)),
+            "--pe" => pe_path = Some(PathBuf::from(val)),
             "--era" => {
                 era = DosEra::parse(val).ok_or_else(|| ToolError::CliUsage {
                     message: format!("unknown DOS era `{val}`"),
@@ -2897,9 +3034,13 @@ where
         idx += 2;
     }
 
+    if let Some(path) = pe_path {
+        return run_pe_cli(&path, &cmd_tail, lcov_out.as_deref(), out);
+    }
+
     let Some(path) = com_path else {
         return Err(ToolError::CliUsage {
-            message: "--com <binary.com> is required".into(),
+            message: "--com <binary.com> or --pe <binary.exe> is required".into(),
         });
     };
 

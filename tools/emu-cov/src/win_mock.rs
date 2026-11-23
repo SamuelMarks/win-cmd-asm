@@ -299,6 +299,20 @@ impl SharedWinEnv {
         env
     }
 
+    /// Inserts or updates a `REG_SZ` (`1`) UTF-16LE Registry value under `key_path`.
+    pub fn set_reg_sz(&mut self, key_path: &str, val_name: &str, val: &str) {
+        let mut raw = Vec::with_capacity((val.len() + 1) * 2);
+        for u in val.encode_utf16() {
+            raw.extend_from_slice(&u.to_le_bytes());
+        }
+        raw.extend_from_slice(&0u16.to_le_bytes());
+        let k = key_path.replace('/', bs_str()).to_ascii_uppercase();
+        self.registry
+            .entry(k)
+            .or_default()
+            .insert(val_name.to_ascii_uppercase(), (1, raw));
+    }
+
     /// Normalizes a Win32 / `WinCE` path, returning `(display_path, lookup_key)`.
     #[must_use]
     pub fn normalize_key(&self, raw: &str, is_wince: bool, cwd: &str) -> (String, String) {
@@ -531,6 +545,10 @@ pub enum WinHandle {
         /// Child process exit status (`GetExitCodeProcess`).
         exit_code: u32,
     },
+    /// Access token handle (`OpenProcessToken`).
+    Token,
+    /// Worker thread handle (`CreateThread`).
+    Thread,
 }
 
 /// Callback signature invoked when `CreateProcessW` launches a nested `wincmd` subshell.
@@ -574,8 +592,12 @@ pub struct WinProcState {
     pub self_exe: String,
     /// Guest address of UTF-16LE command line (`GetCommandLineW`).
     pub cmdline_w_addr: u64,
+    /// Guest address of ANSI/UTF-8 command line (`GetCommandLineA`).
+    pub cmdline_a_addr: u64,
     /// Guest address of UTF-16LE environment block (`GetEnvironmentStringsW`).
     pub env_w_addr: u64,
+    /// Process-local environment variable overrides from `SetEnvironmentVariableW`.
+    pub env_overrides: BTreeMap<String, Option<String>>,
     /// Active console output codepage (`GetConsoleOutputCP`).
     pub console_cp: u32,
     /// Active console mode flags (`GetConsoleMode`).
@@ -637,7 +659,9 @@ impl WinProcState {
             cwd,
             self_exe,
             cmdline_w_addr: 0,
+            cmdline_a_addr: 0,
             env_w_addr: 0,
+            env_overrides: BTreeMap::new(),
             console_cp: 65001,
             console_mode: 0x0003,
             console_attr: 0x0007,
@@ -702,14 +726,22 @@ impl WinProcState {
                 mem.alloc_pages(hint, sz.max(4096))
             }
             "VirtualFree"
+            | "FreeLibrary"
+            | "LocalFree"
+            | "SwitchToThread"
             | "FreeEnvironmentStringsW"
             | "SetUnhandledExceptionFilter"
             | "SetConsoleCtrlHandler"
             | "SetConsoleCursorPosition"
+            | "SetConsoleScreenBufferSize"
+            | "SetFileTime"
+            | "SetEndOfFile"
             | "SetLocalTime"
             | "SetHandleInformation"
             | "SetErrorMode"
             | "FlushFileBuffers"
+            | "Wow64DisableWow64FsRedirection"
+            | "Wow64RevertWow64FsRedirection"
             | "Sleep" => Ok(1),
             "ExitProcess" => {
                 let code = u32::try_from(arg(0, mem)? & 0xFFFF_FFFF).unwrap_or(0);
@@ -727,8 +759,211 @@ impl WinProcState {
                 Ok(0)
             }
             "GetTickCount" => Ok(0x1234_5678),
+            "GetVersion" => {
+                let v = (self.os_version.0 & 0xFF)
+                    | ((self.os_version.1 & 0xFF) << 8)
+                    | ((self.os_version.2 & 0x7FFF) << 16);
+                Ok(u64::from(v))
+            }
             "GetCommandLineW" => Ok(self.cmdline_w_addr),
+            "GetCommandLineA" => Ok(self.cmdline_a_addr),
             "GetEnvironmentStringsW" => Ok(self.env_w_addr),
+            "GetACP" | "GetOEMCP" | "GetConsoleCP" | "GetConsoleOutputCP" => {
+                Ok(u64::from(self.console_cp))
+            }
+            "GetCPInfo" => {
+                let cp_ptr = arg(1, mem)?;
+                if cp_ptr != 0 {
+                    mem.write_slice(cp_ptr, &[0u8; 20])?;
+                    mem.write_u32_le(cp_ptr, 1)?;
+                    mem.write_u8(cp_ptr.wrapping_add(4), b'?')?;
+                }
+                Ok(1)
+            }
+            "GetFileType" => {
+                let h = arg(0, mem)?;
+                let ft = match self.handles.get(&h) {
+                    Some(WinHandle::StdIn | WinHandle::StdOut | WinHandle::StdErr | WinHandle::Nul) => 2,
+                    Some(WinHandle::PipeRead { .. } | WinHandle::PipeWrite { .. }) => 3,
+                    Some(WinHandle::File { .. }) => 1,
+                    _ => 0,
+                };
+                Ok(ft)
+            }
+            "SetStdHandle" => {
+                let kind = u32::try_from(arg(0, mem)? & 0xFFFF_FFFF).unwrap_or(0);
+                let h = arg(1, mem)?;
+                match kind {
+                    0xFFFF_FFF6 => self.std_in_handle = h,
+                    0xFFFF_FFF5 => self.std_out_handle = h,
+                    0xFFFF_FFF4 => self.std_err_handle = h,
+                    _ => return Ok(0),
+                }
+                Ok(1)
+            }
+            "DuplicateHandle" => {
+                let src_h = arg(1, mem)?;
+                let tgt_ptr = arg(3, mem)?;
+                let Some(entry) = self.handles.get(&src_h).cloned() else {
+                    self.last_error = 6;
+                    return Ok(0);
+                };
+                let nh = self.alloc_handle(entry);
+                if tgt_ptr != 0 {
+                    mem.write_ptr(tgt_ptr, nh, is_64)?;
+                }
+                Ok(1)
+            }
+            "SetEnvironmentVariableW" => {
+                let name = mem.read_wstr(arg(0, mem)?)?.to_ascii_uppercase();
+                let val_ptr = arg(1, mem)?;
+                let val_opt = if val_ptr == 0 {
+                    None
+                } else {
+                    Some(mem.read_wstr(val_ptr)?)
+                };
+                self.env_overrides.insert(name, val_opt);
+                Ok(1)
+            }
+            "GetShortPathNameW" | "GetLongPathNameW" => {
+                let raw = mem.read_wstr(arg(0, mem)?)?;
+                let dst = arg(1, mem)?;
+                let cap = usize::try_from(arg(2, mem)?).unwrap_or(0);
+                let (disp, _) = self.shared.borrow().normalize_key(&raw, self.is_wince, &self.cwd);
+                let cch = disp.encode_utf16().count();
+                if dst != 0 && cap > cch {
+                    let n = mem.write_wstr(dst, &disp, cap)?;
+                    Ok(u64::from(n))
+                } else {
+                    Ok(u64::try_from(cch + 1).unwrap_or(0))
+                }
+            }
+            "GetDiskFreeSpaceW" => {
+                let spc = arg(1, mem)?;
+                let bps = arg(2, mem)?;
+                let free_c = arg(3, mem)?;
+                let tot_c = arg(4, mem)?;
+                if spc != 0 {
+                    mem.write_u32_le(spc, 8)?;
+                }
+                if bps != 0 {
+                    mem.write_u32_le(bps, 512)?;
+                }
+                if free_c != 0 {
+                    mem.write_u32_le(free_c, 2_621_440)?;
+                }
+                if tot_c != 0 {
+                    mem.write_u32_le(tot_c, 16_777_216)?;
+                }
+                Ok(1)
+            }
+            "GetDriveTypeW" | "GetDriveTypeA" => Ok(3),
+            "GetVolumeInformationW" => {
+                let vol_ptr = arg(1, mem)?;
+                let vol_cap = usize::try_from(arg(2, mem)?).unwrap_or(0);
+                let ser_ptr = arg(3, mem)?;
+                let max_comp = arg(4, mem)?;
+                let flags_ptr = arg(5, mem)?;
+                let fs_ptr = arg(6, mem)?;
+                let fs_cap = usize::try_from(arg(7, mem)?).unwrap_or(0);
+                if vol_ptr != 0 && vol_cap > 6 {
+                    let _ = mem.write_wstr(vol_ptr, "SYSTEM", vol_cap)?;
+                }
+                if ser_ptr != 0 {
+                    mem.write_u32_le(ser_ptr, 0x1234_5678)?;
+                }
+                if max_comp != 0 {
+                    mem.write_u32_le(max_comp, 255)?;
+                }
+                if flags_ptr != 0 {
+                    mem.write_u32_le(flags_ptr, 0x0007_00FF)?;
+                }
+                if fs_ptr != 0 && fs_cap > 4 {
+                    let _ = mem.write_wstr(fs_ptr, "NTFS", fs_cap)?;
+                }
+                Ok(1)
+            }
+            "FileTimeToLocalFileTime" | "LocalFileTimeToFileTime" => {
+                let src = arg(0, mem)?;
+                let dst = arg(1, mem)?;
+                if src != 0 && dst != 0 {
+                    let ft = mem.read_u64_le(src)?;
+                    mem.write_u64_le(dst, ft)?;
+                }
+                Ok(1)
+            }
+            "FileTimeToSystemTime" => {
+                let st = arg(1, mem)?;
+                if st != 0 {
+                    mem.write_u16_le(st, 2026)?;
+                    mem.write_u16_le(st.wrapping_add(2), 11)?;
+                    mem.write_u16_le(st.wrapping_add(4), 1)?;
+                    mem.write_u16_le(st.wrapping_add(6), 23)?;
+                    mem.write_u16_le(st.wrapping_add(8), 14)?;
+                    mem.write_u16_le(st.wrapping_add(10), 30)?;
+                    mem.write_u16_le(st.wrapping_add(12), 45)?;
+                    mem.write_u16_le(st.wrapping_add(14), 0)?;
+                }
+                Ok(1)
+            }
+            "SystemTimeToFileTime" => {
+                let ft = arg(1, mem)?;
+                if ft != 0 {
+                    mem.write_u32_le(ft, 0x8000_0000)?;
+                    mem.write_u32_le(ft.wrapping_add(4), 0x01DC_5BE0)?;
+                }
+                Ok(1)
+            }
+            "FillConsoleOutputAttribute" => {
+                let cnt = u32::try_from(arg(2, mem)? & 0xFFFF_FFFF).unwrap_or(0);
+                let written_ptr = arg(4, mem)?;
+                if written_ptr != 0 {
+                    mem.write_u32_le(written_ptr, cnt)?;
+                }
+                Ok(1)
+            }
+            "ReadConsoleW" => {
+                let h = arg(0, mem)?;
+                let buf = arg(1, mem)?;
+                let max_ch = usize::try_from(arg(2, mem)?).unwrap_or(0);
+                let read_ptr = arg(3, mem)?;
+                let chunk = self.read_handle_bytes(h, max_ch);
+                let text = String::from_utf8_lossy(&chunk);
+                let mut n = 0u32;
+                for u in text.encode_utf16().take(max_ch) {
+                    mem.write_u16_le(buf.wrapping_add(u64::from(n) * 2), u)?;
+                    n += 1;
+                }
+                if read_ptr != 0 {
+                    mem.write_u32_le(read_ptr, n)?;
+                }
+                Ok(1)
+            }
+            "GetModuleHandleA" | "LoadLibraryA" => {
+                let name = mem.read_cstr(arg(0, mem)?).unwrap_or_default().to_ascii_uppercase();
+                if name.is_empty() || name.contains("KERNEL32") {
+                    Ok(0x7700_0000)
+                } else if name.contains("NTDLL") {
+                    Ok(0x7710_0000)
+                } else if name.contains("ADVAPI32") {
+                    Ok(0x7720_0000)
+                } else if name.contains("PSAPI") {
+                    Ok(0x7730_0000)
+                } else {
+                    Ok(0)
+                }
+            }
+            "GetTempPathW" => {
+                let cap = usize::try_from(arg(0, mem)?).unwrap_or(0);
+                let dst = arg(1, mem)?;
+                let tmp = format!("C:{BS}Temp{BS}");
+                if dst != 0 && cap > tmp.len() {
+                    let n = mem.write_wstr(dst, &tmp, cap)?;
+                    Ok(u64::from(n))
+                } else {
+                    Ok(u64::try_from(tmp.len() + 1).unwrap_or(0))
+                }
+            }
             "GetModuleFileNameW" => {
                 let dst = arg(1, mem)?;
                 let max_ch = usize::try_from(arg(2, mem)?).unwrap_or(0);
@@ -808,7 +1043,6 @@ impl WinProcState {
                     Ok(0)
                 }
             }
-            "GetConsoleOutputCP" => Ok(u64::from(self.console_cp)),
             "SetConsoleCP" | "SetConsoleOutputCP" => {
                 self.console_cp = u32::try_from(arg(0, mem)? & 0xFFFF_FFFF).unwrap_or(65001);
                 Ok(1)
@@ -1024,7 +1258,7 @@ impl WinProcState {
                     Ok(1)
                 }
             }
-            "CopyFileW" => {
+            "CopyFileW" | "CopyFileExW" => {
                 let src = mem.read_wstr(arg(0, mem)?)?;
                 let dst = mem.read_wstr(arg(1, mem)?)?;
                 let data_opt = {
@@ -1072,8 +1306,13 @@ impl WinProcState {
             }
             "FindFirstFileW" => {
                 let pat = mem.read_wstr(arg(0, mem)?)?;
-                let wfd_ptr = arg(1, mem)?;
-                self.find_first(mem, &pat, wfd_ptr)
+                let wfd = arg(1, mem)?;
+                self.find_first(mem, &pat, wfd)
+            }
+            "FindFirstFileExW" => {
+                let pat = mem.read_wstr(arg(0, mem)?)?;
+                let wfd = arg(2, mem)?;
+                self.find_first(mem, &pat, wfd)
             }
             "FindNextFileW" => {
                 let h = arg(0, mem)?;
@@ -1178,6 +1417,8 @@ impl WinProcState {
                     Ok(0x7710_0000)
                 } else if name.contains("ADVAPI32") {
                     Ok(0x7720_0000)
+                } else if name.contains("PSAPI") {
+                    Ok(0x7730_0000)
                 } else {
                     Ok(0)
                 }
@@ -1185,6 +1426,206 @@ impl WinProcState {
             "GetProcAddress" => {
                 let fn_name = mem.read_cstr(arg(1, mem)?)?;
                 Ok(thunk_resolver(&fn_name))
+            }
+            "GetCurrentProcess" => Ok(if is_64 { u64::MAX } else { 0xFFFF_FFFF }),
+            "GetCurrentProcessId" => Ok(4242),
+            "GlobalMemoryStatusEx" => {
+                let ptr = arg(0, mem)?;
+                if ptr != 0 {
+                    mem.write_u32_le(ptr, 64)?;
+                    mem.write_u32_le(ptr + 4, 25)?;
+                    mem.write_u64_le(ptr + 8, 8_589_934_592)?;
+                    mem.write_u64_le(ptr + 16, 6_442_450_944)?;
+                    mem.write_u64_le(ptr + 24, 17_179_869_184)?;
+                    mem.write_u64_le(ptr + 32, 12_884_901_888)?;
+                    mem.write_u64_le(ptr + 40, 2_147_352_576)?;
+                    mem.write_u64_le(ptr + 48, 2_080_374_784)?;
+                    mem.write_u64_le(ptr + 56, 0)?;
+                }
+                Ok(1)
+            }
+            "GlobalMemoryStatus" => {
+                let ptr = arg(0, mem)?;
+                if ptr != 0 {
+                    if is_64 {
+                        mem.write_u32_le(ptr, 56)?;
+                        mem.write_u32_le(ptr + 4, 25)?;
+                        mem.write_u64_le(ptr + 8, 2_147_483_648)?;
+                        mem.write_u64_le(ptr + 16, 1_610_612_736)?;
+                        mem.write_u64_le(ptr + 24, 4_294_967_296)?;
+                        mem.write_u64_le(ptr + 32, 3_221_225_472)?;
+                        mem.write_u64_le(ptr + 40, 2_147_352_576)?;
+                        mem.write_u64_le(ptr + 48, 2_080_374_784)?;
+                    } else {
+                        mem.write_u32_le(ptr, 32)?;
+                        mem.write_u32_le(ptr + 4, 25)?;
+                        mem.write_u32_le(ptr + 8, 536_870_912)?;
+                        mem.write_u32_le(ptr + 12, 402_653_184)?;
+                        mem.write_u32_le(ptr + 16, 1_073_741_824)?;
+                        mem.write_u32_le(ptr + 20, 805_306_368)?;
+                        mem.write_u32_le(ptr + 24, 2_147_352_576)?;
+                        mem.write_u32_le(ptr + 28, 2_080_374_784)?;
+                    }
+                }
+                Ok(1)
+            }
+            "GetProcessMemoryInfo" | "K32GetProcessMemoryInfo" => {
+                let ptr = arg(1, mem)?;
+                let cb = u32::try_from(arg(2, mem)? & 0xFFFF_FFFF).unwrap_or(0);
+                if ptr != 0 && cb >= 16 {
+                    mem.write_u32_le(ptr, cb)?;
+                    let ws_off = if is_64 { 16 } else { 12 };
+                    if u64::from(cb) >= ws_off + if is_64 { 8 } else { 4 } {
+                        mem.write_ptr(ptr + ws_off, 4_194_304, is_64)?;
+                    }
+                }
+                Ok(1)
+            }
+            "GetComputerNameExW" => {
+                let dst = arg(1, mem)?;
+                let sz_ptr = arg(2, mem)?;
+                let host = "WINCMDHOST";
+                if sz_ptr != 0 {
+                    let cap = usize::try_from(mem.read_u32_le(sz_ptr)?).unwrap_or(0);
+                    if dst != 0 && cap > host.len() {
+                        let n = mem.write_wstr(dst, host, cap)?;
+                        mem.write_u32_le(sz_ptr, n)?;
+                        return Ok(1);
+                    }
+                    mem.write_u32_le(sz_ptr, u32::try_from(host.len() + 1).unwrap_or(0))?;
+                }
+                Ok(0)
+            }
+            "GetComputerNameW" => {
+                let dst = arg(0, mem)?;
+                let sz_ptr = arg(1, mem)?;
+                let host = "WINCMDHOST";
+                if sz_ptr != 0 {
+                    let cap = usize::try_from(mem.read_u32_le(sz_ptr)?).unwrap_or(0);
+                    if dst != 0 && cap > host.len() {
+                        let n = mem.write_wstr(dst, host, cap)?;
+                        mem.write_u32_le(sz_ptr, n)?;
+                        return Ok(1);
+                    }
+                    mem.write_u32_le(sz_ptr, u32::try_from(host.len() + 1).unwrap_or(0))?;
+                }
+                Ok(0)
+            }
+            "GetEnvironmentVariableW" => {
+                let name = mem.read_wstr(arg(0, mem)?)?;
+                let dst = arg(1, mem)?;
+                let cap = usize::try_from(arg(2, mem)?).unwrap_or(0);
+                if let Some(val) = self.lookup_guest_env(mem, &name)? {
+                    if dst != 0 && cap > val.encode_utf16().count() {
+                        let n = mem.write_wstr(dst, &val, cap)?;
+                        Ok(u64::from(n))
+                    } else {
+                        Ok(u64::try_from(val.encode_utf16().count() + 1).unwrap_or(0))
+                    }
+                } else {
+                    self.last_error = 203;
+                    Ok(0)
+                }
+            }
+            "GetFullPathNameW" => {
+                let raw = mem.read_wstr(arg(0, mem)?)?;
+                let cap = usize::try_from(arg(1, mem)?).unwrap_or(0);
+                let dst = arg(2, mem)?;
+                let part_ptr = arg(3, mem)?;
+                let (disp, _) = self.shared.borrow().normalize_key(&raw, self.is_wince, &self.cwd);
+                if dst != 0 && cap > disp.encode_utf16().count() {
+                    let n = mem.write_wstr(dst, &disp, cap)?;
+                    if part_ptr != 0 {
+                        let leaf_u16_off = disp
+                            .rfind(BS)
+                            .map_or(0, |idx| disp[..=idx].encode_utf16().count() * 2);
+                        mem.write_ptr(part_ptr, dst + u64::try_from(leaf_u16_off).unwrap_or(0), is_64)?;
+                    }
+                    Ok(u64::from(n))
+                } else {
+                    Ok(u64::try_from(disp.encode_utf16().count() + 1).unwrap_or(0))
+                }
+            }
+            "GetFinalPathNameByHandleW" => {
+                let h = arg(0, mem)?;
+                let dst = arg(1, mem)?;
+                let cap = usize::try_from(arg(2, mem)?).unwrap_or(0);
+                let Some(WinHandle::File { key, .. }) = self.handles.get(&h).cloned() else {
+                    self.last_error = 6;
+                    return Ok(0);
+                };
+                let disp = {
+                    let env = self.shared.borrow();
+                    let resolved = env.resolve_target_key(&key, self.is_wince, &self.cwd);
+                    env.nodes
+                        .get(&resolved)
+                        .map_or(resolved, |n| n.display_path.clone())
+                };
+                let full = format!("{}{}{disp}", unc_str(), format_args!("?{BS}"));
+                if dst != 0 && cap > full.encode_utf16().count() {
+                    let n = mem.write_wstr(dst, &full, cap)?;
+                    Ok(u64::from(n))
+                } else {
+                    Ok(u64::try_from(full.encode_utf16().count() + 1).unwrap_or(0))
+                }
+            }
+            "GetFileSizeEx" => {
+                let h = arg(0, mem)?;
+                let sz_ptr = arg(1, mem)?;
+                let Some(WinHandle::File { key, .. }) = self.handles.get(&h).cloned() else {
+                    self.last_error = 6;
+                    return Ok(0);
+                };
+                let sz = self
+                    .shared
+                    .borrow()
+                    .nodes
+                    .get(&key)
+                    .map_or(0, |n| u64::try_from(n.data.borrow().len()).unwrap_or(0));
+                if sz_ptr != 0 {
+                    mem.write_u64_le(sz_ptr, sz)?;
+                }
+                Ok(1)
+            }
+            "GetFileSize" => {
+                let h = arg(0, mem)?;
+                let hi_ptr = arg(1, mem)?;
+                let Some(WinHandle::File { key, .. }) = self.handles.get(&h).cloned() else {
+                    self.last_error = 6;
+                    return Ok(0xFFFF_FFFF);
+                };
+                let sz = self
+                    .shared
+                    .borrow()
+                    .nodes
+                    .get(&key)
+                    .map_or(0, |n| u64::try_from(n.data.borrow().len()).unwrap_or(0));
+                if hi_ptr != 0 {
+                    mem.write_u32_le(hi_ptr, u32::try_from(sz >> 32).unwrap_or(0))?;
+                }
+                Ok(sz & 0xFFFF_FFFF)
+            }
+            "GetFileTime" => {
+                let cr = arg(1, mem)?;
+                let ac = arg(2, mem)?;
+                let wr = arg(3, mem)?;
+                for p in [cr, ac, wr] {
+                    if p != 0 {
+                        mem.write_u32_le(p, 0x8000_0000)?;
+                        mem.write_u32_le(p + 4, 0x01DC_5BE0)?;
+                    }
+                }
+                Ok(1)
+            }
+            "CompareFileTime" => {
+                let ft1 = mem.read_u64_le(arg(0, mem)?)?;
+                let ft2 = mem.read_u64_le(arg(1, mem)?)?;
+                let res: u64 = match ft1.cmp(&ft2) {
+                    core::cmp::Ordering::Less => 0xFFFF_FFFF,
+                    core::cmp::Ordering::Equal => 0,
+                    core::cmp::Ordering::Greater => 1,
+                };
+                Ok(res)
             }
             "RegOpenKeyExW" => {
                 let root = arg(0, mem)?;
@@ -1266,6 +1707,190 @@ impl WinProcState {
                 let _ = self.handles.remove(&hk);
                 Ok(0)
             }
+            "RegDeleteValueW" => {
+                let hk = arg(0, mem)?;
+                let val_name = mem.read_wstr(arg(1, mem)?)?.to_ascii_uppercase();
+                let Some(WinHandle::RegKey { path }) = self.handles.get(&hk).cloned() else {
+                    return Ok(6);
+                };
+                let removed = self
+                    .shared
+                    .borrow_mut()
+                    .registry
+                    .get_mut(&path)
+                    .and_then(|m| m.remove(&val_name))
+                    .is_some();
+                Ok(if removed { 0 } else { 2 })
+            }
+            "RegDeleteKeyW" | "RegDeleteKeyExW" => {
+                let root = arg(0, mem)?;
+                let sub = mem.read_wstr(arg(1, mem)?)?;
+                let base = if let Some(WinHandle::RegKey { path }) = self.handles.get(&root).cloned()
+                {
+                    if sub.is_empty() {
+                        path
+                    } else {
+                        format!("{path}{BS}{}", sub.trim_matches(BS)).to_ascii_uppercase()
+                    }
+                } else {
+                    format!("{}{BS}{}", Self::reg_root_name(root), sub.trim_matches(BS))
+                        .to_ascii_uppercase()
+                };
+                let removed = self.shared.borrow_mut().registry.remove(&base).is_some();
+                Ok(if removed { 0 } else { 2 })
+            }
+            "RegEnumValueW" => {
+                let hk = arg(0, mem)?;
+                let idx = usize::try_from(arg(1, mem)?).unwrap_or(0);
+                let name_ptr = arg(2, mem)?;
+                let cch_name_ptr = arg(3, mem)?;
+                let type_ptr = arg(5, mem)?;
+                let data_ptr = arg(6, mem)?;
+                let cb_data_ptr = arg(7, mem)?;
+                let Some(WinHandle::RegKey { path }) = self.handles.get(&hk).cloned() else {
+                    return Ok(6);
+                };
+                let nth = self
+                    .shared
+                    .borrow()
+                    .registry
+                    .get(&path)
+                    .and_then(|m| m.iter().nth(idx).map(|(k, v)| (k.clone(), v.clone())));
+                let Some((val_name, (reg_type, raw))) = nth else {
+                    return Ok(259);
+                };
+                if cch_name_ptr != 0 {
+                    let cap = usize::try_from(mem.read_u32_le(cch_name_ptr)?).unwrap_or(0);
+                    let n = if name_ptr != 0 && cap > 0 {
+                        mem.write_wstr(name_ptr, &val_name, cap)?
+                    } else {
+                        0
+                    };
+                    mem.write_u32_le(cch_name_ptr, n)?;
+                }
+                if type_ptr != 0 {
+                    mem.write_u32_le(type_ptr, reg_type)?;
+                }
+                if cb_data_ptr != 0 {
+                    let cap = usize::try_from(mem.read_u32_le(cb_data_ptr)?).unwrap_or(0);
+                    mem.write_u32_le(cb_data_ptr, u32::try_from(raw.len()).unwrap_or(0))?;
+                    if data_ptr != 0 && cap >= raw.len() {
+                        mem.write_slice(data_ptr, &raw)?;
+                    }
+                }
+                Ok(0)
+            }
+            "RegEnumKeyExW" => {
+                let hk = arg(0, mem)?;
+                let idx = usize::try_from(arg(1, mem)?).unwrap_or(0);
+                let name_ptr = arg(2, mem)?;
+                let cch_ptr = arg(3, mem)?;
+                let Some(WinHandle::RegKey { path }) = self.handles.get(&hk).cloned() else {
+                    return Ok(6);
+                };
+                let prefix = format!("{path}{BS}");
+                let mut children = BTreeSet::new();
+                for k in self.shared.borrow().registry.keys() {
+                    if let Some(rest) = k.strip_prefix(&prefix) {
+                        let child = rest.split(BS).next().unwrap_or("");
+                        if !child.is_empty() {
+                            let _ = children.insert(child.to_owned());
+                        }
+                    }
+                }
+                let Some(sub_name) = children.into_iter().nth(idx) else {
+                    return Ok(259);
+                };
+                if cch_ptr != 0 {
+                    let cap = usize::try_from(mem.read_u32_le(cch_ptr)?).unwrap_or(0);
+                    let n = mem.write_wstr(name_ptr, &sub_name, cap)?;
+                    mem.write_u32_le(cch_ptr, n)?;
+                }
+                Ok(0)
+            }
+            "OpenProcessToken" => {
+                let out_tok = arg(2, mem)?;
+                let ht = self.alloc_handle(WinHandle::Token);
+                mem.write_ptr(out_tok, ht, is_64)?;
+                Ok(1)
+            }
+            "GetTokenInformation" => {
+                let class = u32::try_from(arg(1, mem)? & 0xFFFF_FFFF).unwrap_or(0);
+                let info_ptr = arg(2, mem)?;
+                let info_len = usize::try_from(arg(3, mem)?).unwrap_or(0);
+                let ret_len_ptr = arg(4, mem)?;
+                // Binary SID S-1-5-21-500 (16 bytes): rev=1, count=2, auth=[0,0,0,0,0,5], sub0=21, sub1=500
+                let sid_bytes: [u8; 16] = [
+                    1, 2, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 244, 1, 0, 0,
+                ];
+                let hdr_sz: usize = if is_64 { 16 } else { 8 };
+                if class == 1 {
+                    let need = hdr_sz + sid_bytes.len();
+                    if ret_len_ptr != 0 {
+                        mem.write_u32_le(ret_len_ptr, u32::try_from(need).unwrap_or(0))?;
+                    }
+                    if info_ptr == 0 || info_len < need {
+                        self.last_error = 122;
+                        return Ok(0);
+                    }
+                    let sid_addr = info_ptr + u64::try_from(hdr_sz).unwrap_or(0);
+                    mem.write_ptr(info_ptr, sid_addr, is_64)?;
+                    mem.write_ptr(info_ptr + if is_64 { 8 } else { 4 }, 0, is_64)?;
+                    mem.write_slice(sid_addr, &sid_bytes)?;
+                    Ok(1)
+                } else {
+                    if ret_len_ptr != 0 {
+                        mem.write_u32_le(ret_len_ptr, 16)?;
+                    }
+                    if info_ptr != 0 && info_len >= 16 {
+                        mem.write_slice(info_ptr, &[0u8; 16])?;
+                        Ok(1)
+                    } else {
+                        self.last_error = 122;
+                        Ok(0)
+                    }
+                }
+            }
+            "LookupAccountSidW" => {
+                let name_ptr = arg(2, mem)?;
+                let cch_name_ptr = arg(3, mem)?;
+                let dom_ptr = arg(4, mem)?;
+                let cch_dom_ptr = arg(5, mem)?;
+                let use_ptr = arg(6, mem)?;
+                let usr = "Administrator";
+                let dom = "WINCMDHOST";
+                if cch_name_ptr != 0 {
+                    let cap = usize::try_from(mem.read_u32_le(cch_name_ptr)?).unwrap_or(0);
+                    if name_ptr != 0 && cap > usr.len() {
+                        let n = mem.write_wstr(name_ptr, usr, cap)?;
+                        mem.write_u32_le(cch_name_ptr, n)?;
+                    }
+                }
+                if cch_dom_ptr != 0 {
+                    let cap = usize::try_from(mem.read_u32_le(cch_dom_ptr)?).unwrap_or(0);
+                    if dom_ptr != 0 && cap > dom.len() {
+                        let n = mem.write_wstr(dom_ptr, dom, cap)?;
+                        mem.write_u32_le(cch_dom_ptr, n)?;
+                    }
+                }
+                if use_ptr != 0 {
+                    mem.write_u32_le(use_ptr, 1)?;
+                }
+                Ok(1)
+            }
+            "LookupPrivilegeNameW" => {
+                let name_ptr = arg(2, mem)?;
+                let cch_ptr = arg(3, mem)?;
+                let priv_name = "SeChangeNotifyPrivilege";
+                if cch_ptr != 0 {
+                    let cap = usize::try_from(mem.read_u32_le(cch_ptr)?).unwrap_or(0);
+                    if name_ptr != 0 && cap > priv_name.len() {
+                        let n = mem.write_wstr(name_ptr, priv_name, cap)?;
+                        mem.write_u32_le(cch_ptr, n)?;
+                    }
+                }
+                Ok(1)
+            }
             "CreatePipe" => {
                 let rd_ptr = arg(0, mem)?;
                 let wr_ptr = arg(1, mem)?;
@@ -1292,7 +1917,7 @@ impl WinProcState {
                 let pi_ptr = arg(9, mem)?;
                 self.spawn_process(mem, app_ptr, cmd_ptr, si_ptr, pi_ptr)
             }
-            "WaitForSingleObject" | "CreatePseudoConsole" => Ok(0),
+            "WaitForSingleObject" | "WaitForMultipleObjects" | "CreatePseudoConsole" => Ok(0),
             "GetExitCodeProcess" => {
                 let hp = arg(0, mem)?;
                 let code_ptr = arg(1, mem)?;
@@ -1340,6 +1965,39 @@ impl WinProcState {
                 format!("unhandled Win32/WinCE import `{other}`"),
             )),
         }
+    }
+
+    /// Allocates and registers a simulated worker thread handle (`CreateThread`).
+    pub fn alloc_thread_handle(&mut self) -> u64 {
+        self.alloc_handle(WinHandle::Thread)
+    }
+
+    fn lookup_guest_env(
+        &self,
+        mem: &dyn GuestMem,
+        target_name: &str,
+    ) -> Result<Option<String>, ToolError> {
+        if let Some(ov) = self.env_overrides.get(&target_name.to_ascii_uppercase()) {
+            return Ok(ov.clone());
+        }
+        let mut cur = self.env_w_addr;
+        if cur == 0 {
+            return Ok(None);
+        }
+        loop {
+            let entry = mem.read_wstr(cur)?;
+            if entry.is_empty() {
+                break;
+            }
+            let u16_units = u64::try_from(entry.encode_utf16().count() + 1).unwrap_or(1);
+            cur = cur.saturating_add(u16_units * 2);
+            if let Some((k, v)) = entry.split_once('=')
+                && k.eq_ignore_ascii_case(target_name)
+            {
+                return Ok(Some(v.to_owned()));
+            }
+        }
+        Ok(None)
     }
 
     const fn reg_root_name(root: u64) -> &'static str {

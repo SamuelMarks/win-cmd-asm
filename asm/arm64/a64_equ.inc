@@ -137,6 +137,22 @@
 ;; @desc Tokenizing `FOR /F ["opts"] %%I IN (...)` subtype.
 @const A64_FOR_PARSE = 4
 
+;; @const AST_SEQ
+;; @desc Unconditional command separator `&` AST node kind.
+@const AST_SEQ = 0x06
+
+;; @const AST_AND
+;; @desc Short-circuit success `&&` AST node kind.
+@const AST_AND = 0x07
+
+;; @const AST_OR
+;; @desc Short-circuit failure `||` AST node kind.
+@const AST_OR = 0x08
+
+;; @const AST_PIPE
+;; @desc Pipeline `|` AST node kind.
+@const AST_PIPE = 0x09
+
 ;; @const AST_REM
 ;; @desc `REM` comment AST node kind.
 @const AST_REM = 0x0A

@@ -1070,6 +1070,7 @@ fn is_readonly_or_branch_mnemonic(mnemonic: &str, operands: &[String]) -> bool {
     matches!(
         mnemonic,
         "cmp"
+            | "cmn"
             | "test"
             | "tst"
             | "jmp"
@@ -1082,6 +1083,9 @@ fn is_readonly_or_branch_mnemonic(mnemonic: &str, operands: &[String]) -> bool {
             | "str"
             | "strb"
             | "strh"
+            | "stlr"
+            | "stlrb"
+            | "stlrh"
             | "stp"
             | "nop"
             | "clc"
@@ -1287,9 +1291,43 @@ fn collect_string_modified_regs(
     false
 }
 
-fn extract_code_payload(bytes: &[u8]) -> &[u8] {
-    if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+fn extract_dos_mz_payload(bytes: &[u8]) -> &[u8] {
+    if bytes.len() < 0x1C || &bytes[0..2] != b"MZ" {
         return bytes;
+    }
+    let hdr_sz = usize::from(u16::from_le_bytes([bytes[8], bytes[9]])).saturating_mul(16);
+    if hdr_sz >= bytes.len() {
+        return bytes;
+    }
+    let cblp = usize::from(u16::from_le_bytes([bytes[2], bytes[3]]));
+    let cp = usize::from(u16::from_le_bytes([bytes[4], bytes[5]]));
+    let ss_paras = usize::from(u16::from_le_bytes([bytes[0x0E], bytes[0x0F]]));
+    let raw_end = if cp == 0 {
+        bytes.len()
+    } else if cblp == 0 {
+        cp.saturating_mul(512)
+    } else {
+        (cp - 1).saturating_mul(512).saturating_add(cblp)
+    }
+    .min(bytes.len());
+    let text_end = if ss_paras > 0 {
+        hdr_sz.saturating_add(ss_paras.saturating_mul(16)).min(raw_end)
+    } else {
+        raw_end
+    };
+    let mut slice = &bytes[hdr_sz..text_end.max(hdr_sz)];
+    while slice.last() == Some(&0) {
+        slice = &slice[..slice.len() - 1];
+    }
+    slice
+}
+
+fn extract_code_payload(bytes: &[u8]) -> &[u8] {
+    if bytes.len() < 0x1C || &bytes[0..2] != b"MZ" {
+        return bytes;
+    }
+    if bytes.len() < 0x40 {
+        return extract_dos_mz_payload(bytes);
     }
     let lfanew = usize::try_from(u32::from_le_bytes([
         bytes[0x3C],
@@ -1326,7 +1364,7 @@ fn extract_code_payload(bytes: &[u8]) -> &[u8] {
         return bytes;
     }
     if lfanew.saturating_add(24) > bytes.len() || &bytes[lfanew..lfanew + 4] != b"PE\0\0" {
-        return bytes;
+        return extract_dos_mz_payload(bytes);
     }
     let num_secs = usize::from(u16::from_le_bytes([bytes[lfanew + 6], bytes[lfanew + 7]]));
     let opt_sz = usize::from(u16::from_le_bytes([bytes[lfanew + 20], bytes[lfanew + 21]]));
@@ -1442,8 +1480,8 @@ fn decode_ia32_modrm_len(bytes: &[u8], modrm_pos: usize) -> Option<(usize, Optio
         if md == 0 && base == 5 {
             len += 4;
         } else if md == 0 && scale == 0 && idx == 5 && base != 4 && base != 5 {
-            // [reg + ebp] -> canonicalize to (reg, base_reg) pair
-            norm_ebp_sib = Some([reg, base]);
+            // [reg + ebp] -> canonicalize to [modrm, sib]
+            norm_ebp_sib = Some([0x04 | (reg << 3), (5 << 3) | base]);
         } else if md == 1
             && scale == 0
             && base == 5
@@ -1451,8 +1489,13 @@ fn decode_ia32_modrm_len(bytes: &[u8], modrm_pos: usize) -> Option<(usize, Optio
             && idx != 5
             && bytes.get(modrm_pos + 2) == Some(&0)
         {
-            // [ebp + reg + 0] -> canonicalize to identical (reg, idx_reg) pair!
-            norm_ebp_sib = Some([reg, idx]);
+            // [ebp + reg + 0] -> canonicalize to identical [modrm, sib]
+            norm_ebp_sib = Some([0x04 | (reg << 3), (5 << 3) | idx]);
+        } else if md == 0 && scale == 0 && base != 4 && base != 5 && idx != 4 && idx != 5 {
+            // [r1 + r2] == [r2 + r1] (unscaled 1x SIB base/index commute)
+            let lo = base.min(idx);
+            let hi = base.max(idx);
+            norm_ebp_sib = Some([0x04 | (reg << 3), (hi << 3) | lo]);
         }
     }
     if md == 1 {
@@ -1568,8 +1611,8 @@ fn decode_ia32_insn(bytes: &[u8], pc: usize) -> Option<(usize, Ia32NormInsn)> {
         }
         let mut raw = sorted_prefixes;
         raw.extend_from_slice(&[op, op2]);
-        if let Some([r, idx]) = ebp_pair {
-            raw.extend_from_slice(&[0x04 | (r << 3), (5 << 3) | idx]);
+        if let Some(ms) = ebp_pair {
+            raw.extend_from_slice(&ms);
         } else {
             raw.extend_from_slice(&bytes[p..p + mlen]);
         }
@@ -1652,8 +1695,8 @@ fn decode_ia32_fixed_or_modrm(
     }
     let mut raw = sorted_prefixes;
     raw.push(op);
-    if let Some([r, idx]) = ebp_pair {
-        raw.extend_from_slice(&[0x04 | (r << 3), (5 << 3) | idx]);
+    if let Some(ms) = ebp_pair {
+        raw.extend_from_slice(&ms);
     } else {
         raw.extend_from_slice(&bytes[p..p + mlen]);
     }
@@ -2274,6 +2317,7 @@ pub fn lint_directory(dir: &Path) -> Result<usize, ToolError> {
             .strip_prefix(dir)
             .map_or_else(|_| f.to_string_lossy().into_owned(), |p| p.to_string_lossy().into_owned())
             .replace(92 as char, "/");
+        verify_fat83_rel_path(&rel)?;
         let text = fs::read_to_string(f)?;
         let parsed = parse_canonical(&rel, &text)?;
         if parsed.format != BinaryFormat::Include && parsed.cpu.is_none() {
@@ -2306,6 +2350,58 @@ pub fn lint_directory(dir: &Path) -> Result<usize, ToolError> {
     }
 
     Ok(modules.len())
+}
+
+/// Enforces strict FAT 8.3 uppercase-safe filenames (`<= 8.3`, depth `<= 3`) for
+/// `dos16/`, `win16/`, and `inc/` trees so native MS-DOS 2.00/4.00 and Win16 self-hosting works.
+///
+/// # Errors
+///
+/// Returns [`ToolError::Syntax`] if any path component violates FAT 8.3 or depth `<= 3`.
+pub fn verify_fat83_rel_path(rel: &str) -> Result<(), ToolError> {
+    let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    let Some(&top) = parts.first() else {
+        return Ok(());
+    };
+    if !matches!(top, "dos16" | "win16" | "inc") {
+        return Ok(());
+    }
+    if parts.len() > 3 {
+        return Err(ToolError::Syntax {
+            span: SourceSpan::new(rel, 1, 1),
+            message: format!(
+                "FAT 8.3 layout violation: `{rel}` has path depth {} (> 3)",
+                parts.len()
+            ),
+        });
+    }
+    for (idx, comp) in parts.iter().enumerate() {
+        let is_file = idx + 1 == parts.len();
+        let (stem, ext) = if is_file {
+            comp.split_once('.').unwrap_or((comp, ""))
+        } else {
+            (*comp, "")
+        };
+        let valid_chars = |s: &str| {
+            s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        };
+        if stem.is_empty()
+            || stem.len() > 8
+            || ext.len() > 3
+            || ext.contains('.')
+            || !valid_chars(stem)
+            || !valid_chars(ext)
+        {
+            return Err(ToolError::Syntax {
+                span: SourceSpan::new(rel, 1, 1),
+                message: format!(
+                    "FAT 8.3 layout violation: component `{comp}` in `{rel}` exceeds 8.3 or uses invalid chars"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn collect_files(root: &Path, cur: &Path, out: &mut Vec<PathBuf>) -> Result<(), ToolError> {

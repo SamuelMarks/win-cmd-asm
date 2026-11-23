@@ -35,8 +35,10 @@ pub enum BinaryFormat {
     Com,
     /// Authentic 3-part `COMMAND.COM` `.COM` (`RESIDENT` `0x0100`, `TRANSIENT` `0x0000`, `INIT` `0x0000`).
     Com3Part,
-    /// Flat binary starting at `ORG 0x0000` (used for direct `NE` / `MZ` / `.PIF` / `.MSG` images).
+    /// Flat binary starting at `ORG 0x0000` (used for direct `NE` / `.PIF` / `.MSG` images).
     Bin16,
+    /// Relocatable 16-bit MS-DOS `'MZ'` `.EXE` / `OMF` 16-bit object (`@format mz16`).
+    Mz16,
     /// 32-bit `IA-32` MS COFF / `PE32` (`Subsystem 3.10`).
     Coff32,
     /// 64-bit `x86-64` MS COFF / `PE32+` (`Subsystem 5.02`).
@@ -58,6 +60,7 @@ impl BinaryFormat {
             "com" => Some(Self::Com),
             "com3part" => Some(Self::Com3Part),
             "bin16" | "ne16" => Some(Self::Bin16),
+            "mz16" | "mz" => Some(Self::Mz16),
             "coff32" | "pe32" => Some(Self::Coff32),
             "coff64" | "pe64" => Some(Self::Coff64),
             "armv4_pe" | "armv4" => Some(Self::ArmV4Pe),

@@ -721,10 +721,10 @@
     cmp r0, #0x5C
     bne .sl_bk
     ; r8[0..r2+1] is parent prefix!
+    push {r2, r3}
     mov r0, r8
     bl to_u16_longpath_a32
-    mov r1, sp
-    push {r2, r3}
+    add r1, sp, #8
     bl hal_find_first
     pop {r2, r3}
     cmn r0, #1

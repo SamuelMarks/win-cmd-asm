@@ -154,6 +154,8 @@ module WinCmdDosQemuCI
     mem_com = File.join(dos_dir, "MEM.COM")
     hostname_com = File.join(dos_dir, "HOSTNAME.COM")
     whoami_com = File.join(dos_dir, "WHOAMI.COM")
+    wincmdmz_exe = File.join(dos_dir, "WINCMDMZ.EXE")
+    wincmdmz_exe = File.join(build_dir, "fasm", "dos16", "WINCMDMZ.EXE") unless File.file?(wincmdmz_exe)
     [wincmd, wincmd1, winmsg, asmconv, mem_com, hostname_com, whoami_com].each do |bin|
       raise "Missing built DOS16 artifact: #{bin}" unless File.file?(bin)
     end
@@ -176,6 +178,9 @@ module WinCmdDosQemuCI
       FileUtils.cp(base_qcow2, overlay)
     end
 
+    floppy_img = File.join(Dir.pwd, "dist", "release", "wincmd-dos-360k.img")
+    attach_floppy = File.file?(floppy_img) && %w[msdos-4.0 freedos].include?(os_target)
+
     qemu_bin = resolve_qemu_binary
     accel = resolve_qemu_accel
     qemu_args = [
@@ -190,6 +195,7 @@ module WinCmdDosQemuCI
       "-daemonize",
       "-pidfile", pid_file
     ]
+    qemu_args += ["-drive", "file=#{floppy_img},format=raw,if=floppy,index=0,readonly=on"] if attach_floppy
     puts "[dos-qemu] Booting #{os_target} (accel=#{accel}, serial=#{host}:#{port})..."
     raise "Failed to launch QEMU for #{os_target}" unless system(*qemu_args)
 
@@ -206,6 +212,7 @@ module WinCmdDosQemuCI
       comm.fast_upload_file!(mem_com, "#{upload_prefix}MEM.COM")
       comm.fast_upload_file!(hostname_com, "#{upload_prefix}HOSTNAME.COM")
       comm.fast_upload_file!(whoami_com, "#{upload_prefix}WHOAMI.COM")
+      comm.fast_upload_file!(wincmdmz_exe, "#{upload_prefix}WINCMDMZ.EXE") if File.file?(wincmdmz_exe)
 
       checks = [
         ["#{cmd_prefix}WINCMD.COM /C VER", "WINCMD"],
@@ -219,7 +226,12 @@ module WinCmdDosQemuCI
         ["#{cmd_prefix}HOSTNAME.COM", "DOSPC"],
         ["#{cmd_prefix}WHOAMI.COM /USER", "S-1-5-21"]
       ]
+      checks << ["#{cmd_prefix}WINCMDMZ.EXE", "WINCMDMZ"] if File.file?(wincmdmz_exe)
       checks << ["#{cmd_prefix}ASMCONV.COM /?", "ASMCONV"] unless os_target == "msdos-1.25"
+      if attach_floppy
+        checks << ["A:#{BS}WINCMD.COM /C VER", "WINCMD"]
+        checks << ["A:#{BS}HOSTNAME.COM", "DOSPC"]
+      end
 
       checks.each do |cmd, expected|
         out = +""

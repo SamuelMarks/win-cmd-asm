@@ -34,10 +34,16 @@ struct Pe32Hdr {
     imp_rva: u32,
 }
 
-/// Sparse 4 KiB-paged 32/64-bit guest virtual address space with mapped-region bounds checking.
+const TLB_EMPTY: u32 = u32::MAX;
+const TLB_ZERO_MAPPED: u32 = u32::MAX - 1;
+
+/// Sparse 4 KiB-paged 32/64-bit guest virtual address space with mapped-region bounds checking
+/// and an 8-entry direct-mapped software TLB.
 #[derive(Clone, Debug)]
 pub struct SparseGuestMem {
-    pages: BTreeMap<u64, Box<[u8; PAGE_SIZE]>>,
+    pages: Vec<Box<[u8; PAGE_SIZE]>>,
+    page_map: std::collections::HashMap<u64, u32>,
+    tlb: std::cell::Cell<[(u64, u32); 8]>,
     mapped_ranges: Vec<(u64, u64)>,
     next_alloc: u64,
 }
@@ -45,10 +51,12 @@ pub struct SparseGuestMem {
 impl SparseGuestMem {
     /// Creates an empty guest virtual address space with dynamic allocations starting at `alloc_base`.
     #[must_use]
-    pub const fn new(alloc_base: u64) -> Self {
+    pub fn new(alloc_base: u64) -> Self {
         Self {
-            pages: BTreeMap::new(),
-            mapped_ranges: Vec::new(),
+            pages: Vec::with_capacity(64),
+            page_map: std::collections::HashMap::with_capacity(64),
+            tlb: std::cell::Cell::new([(u64::MAX, TLB_EMPTY); 8]),
+            mapped_ranges: Vec::with_capacity(16),
             next_alloc: alloc_base,
         }
     }
@@ -67,17 +75,27 @@ impl SparseGuestMem {
             .iter()
             .any(|&(lo, hi)| addr >= lo && addr < hi)
     }
-}
 
-impl GuestMem for SparseGuestMem {
-    fn read_u8(&self, addr: u64) -> Result<u8, ToolError> {
-        let vpn = addr >> PAGE_SHIFT;
-        let off = usize::try_from(addr & 0xFFF).unwrap_or(0) & PAGE_MASK;
-        if let Some(pg) = self.pages.get(&vpn) {
-            return Ok(pg[off]);
+    #[inline]
+    fn resolve_read_page(&self, vpn: u64, addr: u64) -> Result<Option<&[u8; PAGE_SIZE]>, ToolError> {
+        let slot = usize::try_from(vpn & 7).unwrap_or(0);
+        let mut cur_tlb = self.tlb.get();
+        let (tag, idx) = cur_tlb[slot];
+        if tag == vpn && idx != TLB_EMPTY {
+            if idx == TLB_ZERO_MAPPED {
+                return Ok(None);
+            }
+            return Ok(Some(&self.pages[idx as usize]));
+        }
+        if let Some(&p_idx) = self.page_map.get(&vpn) {
+            cur_tlb[slot] = (vpn, p_idx);
+            self.tlb.set(cur_tlb);
+            return Ok(Some(&self.pages[p_idx as usize]));
         }
         if self.is_mapped(addr) {
-            Ok(0)
+            cur_tlb[slot] = (vpn, TLB_ZERO_MAPPED);
+            self.tlb.set(cur_tlb);
+            Ok(None)
         } else {
             Err(emu_err(
                 addr,
@@ -87,7 +105,19 @@ impl GuestMem for SparseGuestMem {
         }
     }
 
-    fn write_u8(&mut self, addr: u64, val: u8) -> Result<(), ToolError> {
+    #[inline]
+    fn resolve_write_page(&mut self, vpn: u64, addr: u64) -> Result<&mut [u8; PAGE_SIZE], ToolError> {
+        let slot = usize::try_from(vpn & 7).unwrap_or(0);
+        let mut cur_tlb = self.tlb.get();
+        let (tag, idx) = cur_tlb[slot];
+        if tag == vpn && idx < TLB_ZERO_MAPPED {
+            return Ok(&mut self.pages[idx as usize]);
+        }
+        if let Some(&p_idx) = self.page_map.get(&vpn) {
+            cur_tlb[slot] = (vpn, p_idx);
+            self.tlb.set(cur_tlb);
+            return Ok(&mut self.pages[p_idx as usize]);
+        }
         if !self.is_mapped(addr) {
             return Err(emu_err(
                 addr,
@@ -95,10 +125,134 @@ impl GuestMem for SparseGuestMem {
                 format!("unmapped guest write at 0x{addr:08X}"),
             ));
         }
+        let new_idx = u32::try_from(self.pages.len()).unwrap_or(0);
+        self.pages.push(Box::new([0u8; PAGE_SIZE]));
+        self.page_map.insert(vpn, new_idx);
+        cur_tlb[slot] = (vpn, new_idx);
+        self.tlb.set(cur_tlb);
+        Ok(&mut self.pages[new_idx as usize])
+    }
+}
+
+impl GuestMem for SparseGuestMem {
+    #[inline]
+    fn read_u8(&self, addr: u64) -> Result<u8, ToolError> {
         let vpn = addr >> PAGE_SHIFT;
         let off = usize::try_from(addr & 0xFFF).unwrap_or(0) & PAGE_MASK;
-        let pg = self.pages.entry(vpn).or_insert_with(|| Box::new([0u8; PAGE_SIZE]));
+        Ok(self.resolve_read_page(vpn, addr)?.map_or(0, |pg| pg[off]))
+    }
+
+    #[inline]
+    fn write_u8(&mut self, addr: u64, val: u8) -> Result<(), ToolError> {
+        let vpn = addr >> PAGE_SHIFT;
+        let off = usize::try_from(addr & 0xFFF).unwrap_or(0) & PAGE_MASK;
+        let pg = self.resolve_write_page(vpn, addr)?;
         pg[off] = val;
+        Ok(())
+    }
+
+    #[inline]
+    fn read_u16_le(&self, addr: u64) -> Result<u16, ToolError> {
+        let off = usize::try_from(addr & 0xFFF).unwrap_or(0);
+        if off <= PAGE_SIZE - 2 {
+            return Ok(self
+                .resolve_read_page(addr >> PAGE_SHIFT, addr)?
+                .map_or(0, |pg| u16::from_le_bytes([pg[off], pg[off + 1]])));
+        }
+        let b0 = self.read_u8(addr)?;
+        let b1 = self.read_u8(addr.wrapping_add(1))?;
+        Ok(u16::from_le_bytes([b0, b1]))
+    }
+
+    #[inline]
+    fn write_u16_le(&mut self, addr: u64, val: u16) -> Result<(), ToolError> {
+        let off = usize::try_from(addr & 0xFFF).unwrap_or(0);
+        let [b0, b1] = val.to_le_bytes();
+        if off <= PAGE_SIZE - 2 {
+            let pg = self.resolve_write_page(addr >> PAGE_SHIFT, addr)?;
+            pg[off] = b0;
+            pg[off + 1] = b1;
+            return Ok(());
+        }
+        self.write_u8(addr, b0)?;
+        self.write_u8(addr.wrapping_add(1), b1)
+    }
+
+    #[inline]
+    fn read_u32_le(&self, addr: u64) -> Result<u32, ToolError> {
+        let off = usize::try_from(addr & 0xFFF).unwrap_or(0);
+        if off <= PAGE_SIZE - 4 {
+            return Ok(self
+                .resolve_read_page(addr >> PAGE_SHIFT, addr)?
+                .map_or(0, |pg| {
+                    u32::from_le_bytes([pg[off], pg[off + 1], pg[off + 2], pg[off + 3]])
+                }));
+        }
+        let lo = u32::from(self.read_u16_le(addr)?);
+        let hi = u32::from(self.read_u16_le(addr.wrapping_add(2))?);
+        Ok(lo | (hi << 16))
+    }
+
+    #[inline]
+    fn write_u32_le(&mut self, addr: u64, val: u32) -> Result<(), ToolError> {
+        let off = usize::try_from(addr & 0xFFF).unwrap_or(0);
+        if off <= PAGE_SIZE - 4 {
+            let pg = self.resolve_write_page(addr >> PAGE_SHIFT, addr)?;
+            pg[off..off + 4].copy_from_slice(&val.to_le_bytes());
+            return Ok(());
+        }
+        let [b0, b1, b2, b3] = val.to_le_bytes();
+        self.write_u16_le(addr, u16::from_le_bytes([b0, b1]))?;
+        self.write_u16_le(addr.wrapping_add(2), u16::from_le_bytes([b2, b3]))
+    }
+
+    #[inline]
+    fn read_u64_le(&self, addr: u64) -> Result<u64, ToolError> {
+        let off = usize::try_from(addr & 0xFFF).unwrap_or(0);
+        if off <= PAGE_SIZE - 8 {
+            return Ok(self
+                .resolve_read_page(addr >> PAGE_SHIFT, addr)?
+                .map_or(0, |pg| {
+                    u64::from_le_bytes([
+                        pg[off],
+                        pg[off + 1],
+                        pg[off + 2],
+                        pg[off + 3],
+                        pg[off + 4],
+                        pg[off + 5],
+                        pg[off + 6],
+                        pg[off + 7],
+                    ])
+                }));
+        }
+        let lo = u64::from(self.read_u32_le(addr)?);
+        let hi = u64::from(self.read_u32_le(addr.wrapping_add(4))?);
+        Ok(lo | (hi << 32))
+    }
+
+    #[inline]
+    fn write_u64_le(&mut self, addr: u64, val: u64) -> Result<(), ToolError> {
+        let off = usize::try_from(addr & 0xFFF).unwrap_or(0);
+        if off <= PAGE_SIZE - 8 {
+            let pg = self.resolve_write_page(addr >> PAGE_SHIFT, addr)?;
+            pg[off..off + 8].copy_from_slice(&val.to_le_bytes());
+            return Ok(());
+        }
+        let lo = u32::try_from(val & 0xFFFF_FFFF).unwrap_or(0);
+        let hi = u32::try_from(val >> 32).unwrap_or(0);
+        self.write_u32_le(addr, lo)?;
+        self.write_u32_le(addr.wrapping_add(4), hi)
+    }
+
+    fn write_slice(&mut self, mut addr: u64, mut data: &[u8]) -> Result<(), ToolError> {
+        while !data.is_empty() {
+            let off = usize::try_from(addr & 0xFFF).unwrap_or(0);
+            let chunk = data.len().min(PAGE_SIZE - off);
+            let pg = self.resolve_write_page(addr >> PAGE_SHIFT, addr)?;
+            pg[off..off + chunk].copy_from_slice(&data[..chunk]);
+            addr = addr.wrapping_add(u64::try_from(chunk).unwrap_or(0));
+            data = &data[chunk..];
+        }
         Ok(())
     }
 
@@ -438,6 +592,12 @@ impl Arm32Vm {
         Ok(())
     }
 
+    /// Supplies standard input bytes (`ReadFile(hStdIn)` / `CONIN$`) before calling [`Self::run`].
+    pub fn set_stdin(&mut self, data: &[u8]) {
+        self.os.stdin_buf = data.to_vec();
+        self.os.stdin_pos = 0;
+    }
+
     /// Executes the loaded `ARMv4` or ARMv7-A PE32 binary until process exit or `max_steps`.
     ///
     /// # Errors
@@ -445,6 +605,21 @@ impl Arm32Vm {
     /// Returns [`ToolError::Emulator`] on unaligned `ARMv4` load/store, `ARMv7` 8-byte `SP`
     /// misalignment, illegal instruction, unmapped memory fault, or step budget exhaustion.
     pub fn run(&mut self, max_steps: u64) -> Result<Arm32RunResult, ToolError> {
+        self.run_with_coverage(max_steps, true)
+    }
+
+    /// Executes the loaded `ARMv4` or `ARMv7-A` `PE32` image with optional PC/branch coverage collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::Emulator`] on unaligned `ARMv4` load/store, `ARMv7` 8-byte `SP`
+    /// misalignment, illegal instruction, unmapped memory fault, or step budget exhaustion.
+    pub fn run_with_coverage(
+        &mut self,
+        max_steps: u64,
+        record_cov: bool,
+    ) -> Result<Arm32RunResult, ToolError> {
+        self.coverage.disabled = !record_cov;
         let _ = &self.pe_bytes;
         while self.steps < max_steps {
             if let Some(code) = self.os.exited {
@@ -466,7 +641,9 @@ impl Arm32Vm {
                 ));
             }
 
-            self.coverage.executed_pcs.insert(pc);
+            if !self.coverage.disabled {
+                self.coverage.executed_pcs.insert(pc);
+            }
             self.steps += 1;
 
             let step_res = if self.thumb_mode {
@@ -517,6 +694,38 @@ impl Arm32Vm {
                 format!("unknown ARM32 IAT thunk 0x{pc:08X}"),
             ));
         };
+        if api == "CreateThread" {
+            let start_addr = self.regs[2];
+            let param = self.regs[3];
+            let tid_ptr = self.mem.read_u32_le(u64::from(self.regs[13]) + 4)?;
+            let saved_regs = self.regs;
+            let saved_thumb = self.thumb_mode;
+            let saved_nzcv = self.nzcv;
+            let saved_it = self.it_state;
+            let stk = u32::try_from(self.mem.alloc_pages(0, 65_536)?).unwrap_or(0);
+            self.regs[0] = param;
+            self.regs[13] = stk.wrapping_add(65_536);
+            self.regs[14] = if self.is_thumb2 { EXIT_LR | 1 } else { EXIT_LR };
+            self.thumb_mode = self.is_thumb2 && (start_addr & 1) != 0;
+            self.regs[15] = start_addr & !1;
+            self.it_state = 0;
+            let _ = self.run(2_000_000)?;
+            self.regs = saved_regs;
+            self.thumb_mode = saved_thumb;
+            self.nzcv = saved_nzcv;
+            self.it_state = saved_it;
+            let h = u32::try_from(self.os.alloc_thread_handle()).unwrap_or(1);
+            if tid_ptr != 0 {
+                self.mem.write_u32_le(u64::from(tid_ptr), h)?;
+            }
+            self.regs[0] = h;
+            let lr = self.regs[14];
+            if self.is_thumb2 {
+                self.thumb_mode = (lr & 1) != 0;
+            }
+            self.regs[15] = lr & !1;
+            return Ok(());
+        }
         let reg_args = [
             u64::from(self.regs[0]),
             u64::from(self.regs[1]),
@@ -569,6 +778,9 @@ impl Arm32Vm {
     }
 
     fn record_cond_edge(&mut self, pc: u32, taken: bool) {
+        if self.coverage.disabled {
+            return;
+        }
         let entry = self.coverage.branch_edges.entry(pc).or_insert((false, false));
         if taken {
             entry.0 = true;

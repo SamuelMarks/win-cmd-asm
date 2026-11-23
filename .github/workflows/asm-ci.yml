@@ -355,6 +355,9 @@ jobs:
           make lower
           make build TOOLCHAIN="$TOOLCHAIN" TARGET="$TARGET"
           make verify TOOLCHAIN="$TOOLCHAIN" TARGET="$TARGET"
+          if [ "${{ matrix.upload_artifacts }}" = "true" ]; then
+            cargo run --release --quiet -p media-pkg -- --root . --build-dir build --dist-src dist/src --out-dir dist/release
+          fi
           cargo test --workspace
 
       - name: Smoke Test Win32 & Win64 Binaries via Wine (Linux x64)
@@ -414,6 +417,15 @@ jobs:
             Write-Host "  Output: $out"
           }
 
+          & build/nasm/x86_32/WINCMD32.EXE --win9x-ansi-sim /C tests\SMOKE.BAT
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD32.EXE --win9x-ansi-sim failed" }
+          & build/nasm/x86_32/WINCMD32.EXE --nt31-api-cap /C tests\SMOKE.BAT
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD32.EXE --nt31-api-cap failed" }
+          & build/nasm/x86_64/WINCMD64.EXE /C build\nasm\dos16\HOSTNAME.COM
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD64.EXE vm8086 .COM execution failed" }
+          & build/nasm/x86_64/WINCMD64.EXE /C "BUILD.CMD nasm"
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD64.EXE BUILD.CMD self-hosting failed" }
+
           & cargo test --workspace
 
       - name: Lower, Build & Verify (Windows Cygwin)
@@ -430,13 +442,13 @@ jobs:
             nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/dos16/ -f bin dist/src/nasm/dos16/wincmd.asm -o build/nasm/dos16/WINCMD.COM
             nasm -Ox -w+all -w-reloc -w+error -f bin dist/src/nasm/dos16/wincmd_m.asm -o build/nasm/dos16/WINCMD.MSG
             nasm -Ox -w+all -w-reloc -w+error -f bin dist/src/nasm/dos16/util/asmconv.asm -o build/nasm/dos16/ASMCONV.COM
-            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/wincmd_pif.asm -o build/nasm/win16/WINCMD.PIF
+            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_pif.asm -o build/nasm/win16/WINCMD.PIF
             nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_main.asm -o build/nasm/win16/WINCMD16.EXE
             nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_286.asm -o build/nasm/win16/WINCMD286.EXE
           '
           cargo run --release --quiet -p asm-lint -- --budget build/nasm/dos16/WINCMD.COM 49152
           cargo run --release --quiet -p asm-lint -- --budget build/nasm/dos16/ASMCONV.COM 4096
-          cargo run --release --quiet -p asm-lint -- --budget build/nasm/win16/WINCMD.PIF 369
+          cargo run --release --quiet -p asm-lint -- --budget build/nasm/win16/WINCMD.PIF 545
 
       - name: Build & Execute WINCMD_ARM64.EXE Natively on Windows 11 ARM64
         if: matrix.profile == 'windows-arm64'
@@ -444,12 +456,22 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           & cargo run --release --quiet -p asm-conv -- --in-dir asm --out-dir dist/src
-          New-Item -ItemType Directory -Force -Path build/llvm/arm64 | Out-Null
+          New-Item -ItemType Directory -Force -Path build/libs, build/llvm/arm32, build/llvm/arm64 | Out-Null
+          & llvm-dlltool -m arm -d asm/tc/arm_ms/k32_arm.def -l build/libs/kernel32_arm32.lib
+          & llvm-dlltool -m arm64 -d asm/tc/arm_ms/k32_arm.def -l build/libs/kernel32_arm64.lib
+          & llvm-mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I dist/src/llvm-mc/arm32/v7 -filetype=obj dist/src/llvm-mc/arm32/v7/wincmdv7.asm -o build/llvm/arm32/wincmdv7.obj
+          & lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm32/wincmdv7.obj build/libs/kernel32_arm32.lib /OUT:build/llvm/arm32/WINCMD_ARM32.EXE
           & llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I dist/src/llvm-mc/arm64 -filetype=obj dist/src/llvm-mc/arm64/wincmda64.asm -o build/llvm/arm64/wincmda64.obj
-          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup build/llvm/arm64/wincmda64.obj /OUT:build/llvm/arm64/WINCMD_ARM64.EXE
+          & lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm64/wincmda64.obj build/libs/kernel32_arm64.lib /OUT:build/llvm/arm64/WINCMD_ARM64.EXE
+          & cargo run --release --quiet -p asm-lint -- --purity armv7 build/llvm/arm32/WINCMD_ARM32.EXE
           & cargo run --release --quiet -p asm-lint -- --purity arm64 build/llvm/arm64/WINCMD_ARM64.EXE
-          & build/llvm/arm64/WINCMD_ARM64.EXE
-          if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE exited with $LASTEXITCODE" }
+          & cargo run --release --quiet -p emu-cov -- --pe build/llvm/arm32/WINCMD_ARM32.EXE --args "/C VER"
+          & build/llvm/arm64/WINCMD_ARM64.EXE /C VER
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE /C VER exited with $LASTEXITCODE" }
+          & build/llvm/arm64/WINCMD_ARM64.EXE /C tests\SMOKE.BAT
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE SMOKE.BAT exited with $LASTEXITCODE" }
+          & build/llvm/arm64/WINCMD_ARM64.EXE /C BUILD.CMD
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE BUILD.CMD self-hosting failed with $LASTEXITCODE" }
 
       - name: Upload Multi-ISA Built Artifacts
         if: matrix.upload_artifacts == true
@@ -459,9 +481,12 @@ jobs:
           path: |
             build/nasm/**
             build/fasm/**
+            build/fasm-pe32/**
+            build/fasm-coff/**
             build/jwasm/**
             build/fasmarm/**
             build/llvm/**
+            dist/release/**
           retention-days: 14
 
   # ============================================================================

@@ -8,7 +8,7 @@ BUILD_DIR ?= build
 DIST_DIR ?= dist/src
 DOS_OS ?= msdos
 
-.PHONY: all lint lower build verify test fuzz coverage ci-list ci-local ci-docker ci-dos-qemu hooks clean
+.PHONY: all lint lower build verify package test fuzz coverage ci-list ci-local ci-docker ci-dos-qemu hooks clean
 
 all:
 	@TOOLCHAIN="$(TOOLCHAIN)" TARGET="$(TARGET)" BUILD_DIR="$(BUILD_DIR)" DIST_DIR="$(DIST_DIR)" bash ./scripts/build-all.sh all
@@ -24,6 +24,9 @@ build: lower
 
 verify:
 	@TOOLCHAIN="$(TOOLCHAIN)" TARGET="$(TARGET)" BUILD_DIR="$(BUILD_DIR)" DIST_DIR="$(DIST_DIR)" bash ./scripts/build-all.sh verify
+
+package:
+	@TOOLCHAIN="$(TOOLCHAIN)" TARGET="$(TARGET)" BUILD_DIR="$(BUILD_DIR)" DIST_DIR="$(DIST_DIR)" bash ./scripts/build-all.sh package
 
 test:
 	@TOOLCHAIN="$(TOOLCHAIN)" TARGET="$(TARGET)" BUILD_DIR="$(BUILD_DIR)" DIST_DIR="$(DIST_DIR)" bash ./scripts/build-all.sh test
@@ -52,4 +55,4 @@ hooks:
 	@git config core.hooksPath .githooks
 
 clean:
-	@rm -rf "$(BUILD_DIR)" "$(DIST_DIR)" lcov.info
+	@rm -rf "$(BUILD_DIR)" "$(DIST_DIR)" dist/release lcov.info

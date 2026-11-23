@@ -1,0 +1,12 @@
+[package]
+name = "media-pkg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reproducible FAT12 floppy (.IMG), ISO-9660 (.ISO), .ZIP, and standalone source tarball (.TAR.GZ) masterer for win-cmd-asm"
+
+[dependencies]
+wincmd-diag.workspace = true
+
+[lints]
+workspace = true

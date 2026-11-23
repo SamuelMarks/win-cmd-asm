@@ -1,0 +1,60 @@
+;; @file u_imps32.inc
+;; @isa 386
+;; @desc Shared NT 3.1 RTM + Win95 RTM KERNEL32.DLL static IAT imports for IA-32 PE32 utilities (Zero CRT).
+
+@cpu 386
+@format inc
+
+@extern __imp__CloseHandle@4, dword
+@extern __imp__CompareFileTime@8, dword
+@extern __imp__CopyFileA@12, dword
+@extern __imp__CopyFileW@12, dword
+@extern __imp__CreateDirectoryA@8, dword
+@extern __imp__CreateDirectoryW@8, dword
+@extern __imp__CreateFileA@28, dword
+@extern __imp__CreateFileW@28, dword
+@extern __imp__CreateThread@24, dword
+@extern __imp__DeleteFileA@4, dword
+@extern __imp__DeleteFileW@4, dword
+@extern __imp__ExitProcess@4, dword
+@extern __imp__FindClose@4, dword
+@extern __imp__FindFirstFileA@8, dword
+@extern __imp__FindFirstFileW@8, dword
+@extern __imp__FindNextFileA@8, dword
+@extern __imp__FindNextFileW@8, dword
+@extern __imp__FreeLibrary@4, dword
+@extern __imp__GetCommandLineA@0, dword
+@extern __imp__GetCommandLineW@0, dword
+@extern __imp__GetComputerNameA@8, dword
+@extern __imp__GetComputerNameW@8, dword
+@extern __imp__GetConsoleMode@8, dword
+@extern __imp__GetCurrentDirectoryA@8, dword
+@extern __imp__GetCurrentDirectoryW@8, dword
+@extern __imp__GetCurrentProcess@0, dword
+@extern __imp__GetEnvironmentVariableA@12, dword
+@extern __imp__GetEnvironmentVariableW@12, dword
+@extern __imp__GetFileAttributesA@4, dword
+@extern __imp__GetFileAttributesW@4, dword
+@extern __imp__GetFileSize@8, dword
+@extern __imp__GetFileTime@16, dword
+@extern __imp__GetFullPathNameA@16, dword
+@extern __imp__GetFullPathNameW@16, dword
+@extern __imp__GetLastError@0, dword
+@extern __imp__GetModuleHandleA@4, dword
+@extern __imp__GetProcAddress@8, dword
+@extern __imp__GetStdHandle@4, dword
+@extern __imp__GetTickCount@0, dword
+@extern __imp__GetVersion@0, dword
+@extern __imp__GlobalMemoryStatus@4, dword
+@extern __imp__LoadLibraryA@4, dword
+@extern __imp__ReadFile@20, dword
+@extern __imp__SetFileAttributesA@8, dword
+@extern __imp__SetFileAttributesW@8, dword
+@extern __imp__Sleep@4, dword
+@extern __imp__VirtualAlloc@16, dword
+@extern __imp__VirtualFree@12, dword
+@extern __imp__WaitForMultipleObjects@16, dword
+@extern __imp__WaitForSingleObject@8, dword
+@extern __imp__WriteConsoleA@20, dword
+@extern __imp__WriteConsoleW@20, dword
+@extern __imp__WriteFile@20, dword

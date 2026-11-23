@@ -11,16 +11,16 @@
 ;; @out w0 = 1 (TRUE = handled) or 0
 ;; @err none
 ;; @clobbers x0, x1, x2
-;; @desc Thread-safe SetConsoleCtrlHandler callback latching bCtrlBreak with DMB ISH barrier.
+;; @desc Thread-safe SetConsoleCtrlHandler callback latching bCtrlBreak via STLRB release store.
 @proc a64_ctrl_handler
     hint #34
     cmp w0, #2
     b.hi .unhandled
     adr_sym x1, g_a64_ctx
+    mov_imm32 x2, ARM64_CTX.bCtrlBreak
+    add x1, x1, x2
     mov w2, #1
-    dmb ish
-    strb w2, [x1, #ARM64_CTX.bCtrlBreak]
-    dmb ish
+    stlrb w2, [x1]
     mov w0, #1
     ret
 .unhandled:
@@ -663,7 +663,7 @@
 
 ;; @proc hal_open_file_a64
 ;; @abi win_arm64
-;; @in x0 = UTF-16LE path, w1 = mode (0 = read, 1 = write-trunc, 2 = write-append)
+;; @in x0 = UTF-16LE path, w1 = mode (0 = read, 1 = write-trunc, 2 = write-append, 3 = rw-open)
 ;; @out x0 = 64-bit HANDLE (or -1 INVALID_HANDLE_VALUE on error)
 ;; @err x0 = -1 on failure
 ;; @clobbers x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15, x16, x17
@@ -690,6 +690,8 @@
     b.eq .open_rd
     cmp w20, #1
     b.eq .open_tr
+    cmp w20, #3
+    b.eq .open_rw
 
     ; Append mode (2): OPEN_ALWAYS (4), GENERIC_WRITE (0x40000000), then seek to end
     mov x0, x19
@@ -716,6 +718,17 @@
     mov w2, #3
     mov x3, sp
     mov w4, #2 ; CREATE_ALWAYS
+    mov w5, #0x80
+    mov x6, #0
+    call_iat __imp_CreateFileW
+    b .done
+
+.open_rw:
+    mov x0, x19
+    mov_imm32 w1, 0xC0000000 ; GENERIC_READ | GENERIC_WRITE
+    mov w2, #3 ; FILE_SHARE_READ | FILE_SHARE_WRITE
+    mov x3, sp
+    mov w4, #3 ; OPEN_EXISTING
     mov w5, #0x80
     mov x6, #0
     call_iat __imp_CreateFileW

@@ -107,9 +107,51 @@ pub fn convert_tree(in_dir: &Path, out_dir: &Path) -> Result<usize, ToolError> {
             None
         };
 
+        let direct_pe_module = if matches!(
+            module.format,
+            BinaryFormat::Coff32
+                | BinaryFormat::Coff64
+                | BinaryFormat::ArmV4Pe
+                | BinaryFormat::ArmV7Pe
+                | BinaryFormat::Arm64Pe
+        ) {
+            Some(with_transitive_externs(key, module, &parsed_map))
+        } else {
+            None
+        };
+
         for &target in applicable_targets(module) {
-            let lowered = lower::lower_module_with_frames(module, ordered_frames.as_deref(), target)?;
+            let eff_mod = if target == TargetAssembler::FasmArm
+                || (target == TargetAssembler::Fasm && module.format == BinaryFormat::Coff64)
+            {
+                direct_pe_module.as_ref().unwrap_or(module)
+            } else {
+                module
+            };
+            let lowered =
+                lower::lower_module_with_frames(eff_mod, ordered_frames.as_deref(), target)?;
             let dst = out_dir.join(target.slug()).join(rel);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&dst, lowered)?;
+            generated += 1;
+        }
+
+        if key.starts_with("x86_32/") || key.starts_with("inc/") {
+            let eff_mod = direct_pe_module.as_ref().unwrap_or(module);
+            let lowered = lower::lower_module_fasm_pe32(eff_mod)?;
+            let dst = out_dir.join("fasm-pe32").join(rel);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&dst, lowered)?;
+            generated += 1;
+        }
+
+        if key.starts_with("x86_64/") || key.starts_with("inc/") {
+            let lowered = lower::lower_module_fasm_coff64(module, ordered_frames.as_deref())?;
+            let dst = out_dir.join("fasm-coff").join(rel);
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -119,6 +161,64 @@ pub fn convert_tree(in_dir: &Path, out_dir: &Path) -> Result<usize, ToolError> {
     }
 
     Ok(generated)
+}
+
+fn with_transitive_externs(
+    root_key: &str,
+    module: &CanonicalModule,
+    parsed_map: &BTreeMap<String, CanonicalModule>,
+) -> CanonicalModule {
+    let mut seen_syms = BTreeSet::new();
+    for it in &module.items {
+        if let TopItem::Extern { symbol, .. } = it {
+            let _ = seen_syms.insert(symbol.clone());
+        }
+    }
+    let mut inherited = Vec::new();
+    let mut visited = BTreeSet::new();
+    collect_externs_ordered(
+        root_key,
+        module,
+        parsed_map,
+        &mut visited,
+        &mut seen_syms,
+        &mut inherited,
+    );
+    if inherited.is_empty() {
+        return module.clone();
+    }
+    let mut cloned = module.clone();
+    cloned.items.extend(inherited);
+    cloned
+}
+
+fn collect_externs_ordered(
+    cur_key: &str,
+    module: &CanonicalModule,
+    parsed_map: &BTreeMap<String, CanonicalModule>,
+    visited: &mut BTreeSet<String>,
+    seen_syms: &mut BTreeSet<String>,
+    out: &mut Vec<TopItem>,
+) {
+    if !visited.insert(cur_key.to_owned()) {
+        return;
+    }
+    let parent_dir = Path::new(cur_key).parent().unwrap_or_else(|| Path::new(""));
+    for item in &module.items {
+        match item {
+            TopItem::Include { path, .. } => {
+                let joined = parent_dir.join(path);
+                let inc_key = normalize_slash_path(&joined);
+                if let Some(inc_mod) = parsed_map.get(&inc_key) {
+                    collect_externs_ordered(&inc_key, inc_mod, parsed_map, visited, seen_syms, out);
+                }
+            }
+            TopItem::Extern { symbol, .. } if seen_syms.insert(symbol.clone()) => {
+                out.push(item.clone());
+            }
+            _ => {}
+        }
+    }
 }
 
 fn normalize_slash_path(p: &Path) -> String {

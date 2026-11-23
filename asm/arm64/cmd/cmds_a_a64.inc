@@ -1196,11 +1196,11 @@
     bl hal_get_ctx_a64
     cmp w23, #0
     cset w1, eq
-    strb w1, [x0, #ARM64_CTX.bVerifyOn]
+    strb w1, [x0, #ARM64_CTX.bVerifyFlag]
     b .ok0
 .show_verf:
     bl hal_get_ctx_a64
-    ldrb w0, [x0, #ARM64_CTX.bVerifyOn]
+    ldrb w0, [x0, #ARM64_CTX.bVerifyFlag]
     cbz w0, .prt_voff
     adr_sym x0, szVerifyOn_a64
     bl out_str_a64

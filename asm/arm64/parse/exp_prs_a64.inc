@@ -424,48 +424,6 @@
     ret
 @endproc
 
-;; @proc parse_signed_dec_a64
-;; @abi win_arm64
-;; @in x0 = string cursor
-;; @out x0 = parsed signed 64-bit integer, x1 = advanced cursor
-;; @err none
-;; @clobbers x0, x1, x2, x3, x4
-;; @desc Parses an optional `-`/`+` signed decimal integer for `%VAR:~start,len%`.
-@proc parse_signed_dec_a64
-    mov x1, x0
-    mov w2, #0
-    ldrb w0, [x1, #0]
-    cmp w0, #0x2D
-    b.ne .chk_plus
-    mov w2, #1
-    add x1, x1, #1
-    b .digits
-.chk_plus:
-    cmp w0, #0x2B
-    b.ne .digits
-    add x1, x1, #1
-.digits:
-    mov x0, #0
-    mov x4, #10
-.d_lp:
-    ldrb w3, [x1, #0]
-    cmp w3, #0x30
-    b.lo .d_done
-    cmp w3, #0x39
-    b.hi .d_done
-    sub w3, w3, #0x30
-    uxtw x3, w3
-    mul x0, x0, x4
-    add x0, x0, x3
-    add x1, x1, #1
-    b .d_lp
-.d_done:
-    cbz w2, .ret_d
-    neg x0, x0
-.ret_d:
-    ret
-@endproc
-
 ;; @proc expand_var_op_a64
 ;; @abi win_arm64
 ;; @in x0 = inner token (between `%..%` or `!..!`, e.g. `VAR`, `VAR:~0,3`, `VAR:old=new`, `VAR:*old=new`)
@@ -1319,26 +1277,6 @@
     ldp x29, x30, [sp], #16
     hint #29
     ret
-@endproc
-
-;; @proc skip_ws_a64
-;; @abi win_arm64
-;; @in x0 = string cursor
-;; @out x0 = cursor advanced past spaces and tabs
-;; @err none
-;; @clobbers x0, x1
-;; @desc Advances x0 past ASCII space and tab characters.
-@proc skip_ws_a64
-.lp:
-    ldrb w1, [x0, #0]
-    cmp w1, #0x20
-    b.eq .adv
-    cmp w1, #0x09
-    b.eq .adv
-    ret
-.adv:
-    add x0, x0, #1
-    b .lp
 @endproc
 
 ;; @proc scan_cmd_token_a64

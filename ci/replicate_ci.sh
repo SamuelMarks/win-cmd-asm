@@ -81,7 +81,7 @@ run_stage_lint() {
 
 run_stage_native() {
   echo "=== [ci-local 2/7] native ==="
-  make all
+  make package
   cargo test --workspace --quiet
   if command -v wine >/dev/null 2>&1; then
     for bin in build/nasm/x86_32/WINCMD32.EXE build/fasm/x86_64/WINCMD64.EXE build/jwasm/x86_64/WINCMD64.EXE; do

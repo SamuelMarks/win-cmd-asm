@@ -657,6 +657,16 @@ pub enum ToolError {
         /// Diff details (`stdout`, `stderr`, `ERRORLEVEL`, or VFS state).
         details: String,
     },
+
+    /// Release media or archive mastering failure (`media-pkg`).
+    #[display("media packaging error for `{artifact}`: {details}")]
+    #[from(ignore)]
+    MediaPackage {
+        /// Target image or archive name.
+        artifact: String,
+        /// Explanation of the capacity, naming, or format failure.
+        details: String,
+    },
 }
 
 #[cfg(test)]
@@ -807,6 +817,10 @@ mod tests {
                 seed: 0xDEAD_BEEF,
                 case_index: 7,
                 details: "stdout differed".into(),
+            },
+            ToolError::MediaPackage {
+                artifact: "wincmd-dos-160k.img".into(),
+                details: "root directory full".into(),
             },
         ];
         for err in variants {
