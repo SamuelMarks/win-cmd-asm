@@ -29,9 +29,7 @@ pub fn lint_module(
 
 /// Collects declared `@clobbers` register sets for every `@proc` across a slice of modules.
 #[must_use]
-pub fn collect_module_clobbers(
-    modules: &[CanonicalModule],
-) -> BTreeMap<String, BTreeSet<String>> {
+pub fn collect_module_clobbers(modules: &[CanonicalModule]) -> BTreeMap<String, BTreeSet<String>> {
     let mut map = BTreeMap::new();
     for m in modules {
         for item in &m.items {
@@ -532,12 +530,17 @@ fn check_8086_purity(m: &str, operands: &[String], span: &SourceSpan) -> Result<
             message: format!("instruction `{m}` requires 80186+/80386+ (forbidden in 8086)"),
         });
     }
-    if m == "pop" && operands.first().is_some_and(|o| o.eq_ignore_ascii_case("ss")) {
+    if m == "pop"
+        && operands
+            .first()
+            .is_some_and(|o| o.eq_ignore_ascii_case("ss"))
+    {
         return Err(ToolError::OpcodePurity {
             span: span.clone(),
             isa: CpuIsa::X86_8086,
-            message: "`pop ss` triggers early-8088 interrupt shadow bug; use `cli; mov ss, ...; sti`"
-                .into(),
+            message:
+                "`pop ss` triggers early-8088 interrupt shadow bug; use `cli; mov ss, ...; sti`"
+                    .into(),
         });
     }
     if m == "push"
@@ -608,7 +611,16 @@ fn check_stmt_isa_purity(
         CpuIsa::ArmV4 => {
             if matches!(
                 m,
-                "blx" | "clz" | "movw" | "movt" | "udiv" | "sdiv" | "ldrd" | "strd" | "rbit" | "rev"
+                "blx"
+                    | "clz"
+                    | "movw"
+                    | "movt"
+                    | "udiv"
+                    | "sdiv"
+                    | "ldrd"
+                    | "strd"
+                    | "rbit"
+                    | "rev"
             ) {
                 return Err(ToolError::OpcodePurity {
                     span: span.clone(),
@@ -639,7 +651,9 @@ fn check_stmt_isa_purity(
                 return Err(ToolError::OpcodePurity {
                     span: span.clone(),
                     isa,
-                    message: format!("Thumb-2 IT block `{m}` exceeds 4-instruction Windows ARMNT limit"),
+                    message: format!(
+                        "Thumb-2 IT block `{m}` exceeds 4-instruction Windows ARMNT limit"
+                    ),
                 });
             }
         }
@@ -753,9 +767,9 @@ fn instruction_stack_delta(isa: CpuIsa, mnemonic: &str, operands: &[String]) -> 
             -2
         }
         "sub" | "subs"
-            if operands
-                .first()
-                .is_some_and(|r| matches!(r.trim().to_ascii_lowercase().as_str(), "sp" | "esp" | "rsp")) =>
+            if operands.first().is_some_and(|r| {
+                matches!(r.trim().to_ascii_lowercase().as_str(), "sp" | "esp" | "rsp")
+            }) =>
         {
             operands
                 .last()
@@ -763,11 +777,14 @@ fn instruction_stack_delta(isa: CpuIsa, mnemonic: &str, operands: &[String]) -> 
                 .map_or(0, |n| -n)
         }
         "add" | "adds"
-            if operands
-                .first()
-                .is_some_and(|r| matches!(r.trim().to_ascii_lowercase().as_str(), "sp" | "esp" | "rsp")) =>
+            if operands.first().is_some_and(|r| {
+                matches!(r.trim().to_ascii_lowercase().as_str(), "sp" | "esp" | "rsp")
+            }) =>
         {
-            operands.last().and_then(|v| parse_signed_imm(v)).unwrap_or(0)
+            operands
+                .last()
+                .and_then(|v| parse_signed_imm(v))
+                .unwrap_or(0)
         }
         "stp" if operands.last().is_some_and(|o| o.ends_with('!')) => {
             extract_arm64_sp_offset(operands.last().map_or("", String::as_str))
@@ -805,7 +822,10 @@ fn instruction_stack_delta(isa: CpuIsa, mnemonic: &str, operands: &[String]) -> 
 }
 
 fn extract_arm64_sp_offset(mem: &str) -> i32 {
-    let trimmed = mem.trim().trim_end_matches('!').trim_matches(&['[', ']'][..]);
+    let trimmed = mem
+        .trim()
+        .trim_end_matches('!')
+        .trim_matches(&['[', ']'][..]);
     trimmed
         .split(',')
         .nth(1)
@@ -827,8 +847,13 @@ fn parse_signed_imm(raw: &str) -> Option<i32> {
 }
 
 fn is_return_mnemonic(mnemonic: &str, operands: &[String]) -> bool {
-    matches!(mnemonic, "ret" | "retn" | "retf" | "iret" | "iretd" | "iretq")
-        || (mnemonic == "bx" && operands.first().is_some_and(|o| o.eq_ignore_ascii_case("lr")))
+    matches!(
+        mnemonic,
+        "ret" | "retn" | "retf" | "iret" | "iretd" | "iretq"
+    ) || (mnemonic == "bx"
+        && operands
+            .first()
+            .is_some_and(|o| o.eq_ignore_ascii_case("lr")))
         || (mnemonic == "mov"
             && operands.len() == 2
             && operands[0].eq_ignore_ascii_case("pc")
@@ -842,8 +867,7 @@ fn is_unconditional_jump(mnemonic: &str) -> bool {
 fn conditional_branch_target<'a>(mnemonic: &str, operands: &'a [String]) -> Option<&'a str> {
     let is_cond = matches!(
         mnemonic,
-        "jz"
-            | "je"
+        "jz" | "je"
             | "jnz"
             | "jne"
             | "jc"
@@ -898,9 +922,10 @@ fn conditional_branch_target<'a>(mnemonic: &str, operands: &'a [String]) -> Opti
 
 fn is_immediate_token(tok: &str) -> bool {
     const SQUOTE: char = 39 as char;
-    tok.chars().next().is_some_and(|c| {
-        c.is_ascii_digit() || c == '-' || c == '+' || c == SQUOTE || c == '"'
-    }) || tok.starts_with("addr(")
+    tok.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '+' || c == SQUOTE || c == '"')
+        || tok.starts_with("addr(")
 }
 
 fn parse_reg_list(raw: &str) -> BTreeSet<String> {
@@ -1033,8 +1058,8 @@ fn collect_call_clobbers(
     }
     if mnemonic == "blr" && isa == CpuIsa::Arm64 {
         for scratch in [
-            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
-            "x13", "x14", "x15", "x16", "x17", "x30",
+            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+            "x14", "x15", "x16", "x17", "x30",
         ] {
             out.insert(scratch.into());
         }
@@ -1104,8 +1129,7 @@ fn is_readonly_or_branch_mnemonic(mnemonic: &str, operands: &[String]) -> bool {
             | "dsb"
             | "isb"
             | "hint"
-    ) || (mnemonic.starts_with("it")
-        && mnemonic.bytes().skip(2).all(|b| b == b't' || b == b'e'))
+    ) || (mnemonic.starts_with("it") && mnemonic.bytes().skip(2).all(|b| b == b't' || b == b'e'))
         || conditional_branch_target(mnemonic, operands).is_some()
 }
 
@@ -1246,11 +1270,7 @@ fn collect_arm_special_modified_regs(
     false
 }
 
-fn collect_string_modified_regs(
-    isa: CpuIsa,
-    mnemonic: &str,
-    out: &mut BTreeSet<String>,
-) -> bool {
+fn collect_string_modified_regs(isa: CpuIsa, mnemonic: &str, out: &mut BTreeSet<String>) -> bool {
     if (mnemonic.contains("movs") && !mnemonic.contains("movsx")) || mnemonic.contains("cmps") {
         for r in ["si", "di"] {
             let fam = canonical_reg_family(isa, r);
@@ -1311,7 +1331,9 @@ fn extract_dos_mz_payload(bytes: &[u8]) -> &[u8] {
     }
     .min(bytes.len());
     let text_end = if ss_paras > 0 {
-        hdr_sz.saturating_add(ss_paras.saturating_mul(16)).min(raw_end)
+        hdr_sz
+            .saturating_add(ss_paras.saturating_mul(16))
+            .min(raw_end)
     } else {
         raw_end
     };
@@ -1402,7 +1424,11 @@ fn extract_code_payload(bytes: &[u8]) -> &[u8] {
                 bytes[off + 23],
             ]))
             .unwrap_or(0);
-            let len = if virt_sz > 0 { virt_sz.min(raw_sz) } else { raw_sz };
+            let len = if virt_sz > 0 {
+                virt_sz.min(raw_sz)
+            } else {
+                raw_sz
+            };
             if raw_ptr.saturating_add(len) <= bytes.len() {
                 return &bytes[raw_ptr..raw_ptr + len];
             }
@@ -1455,9 +1481,17 @@ const fn is_ia32_pe_image(raw: &[u8]) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ia32NormInsn {
-    Branch { cond: u8, target_off: usize },
-    CallRel { target_off: usize },
-    PushOrMovTextVa { prefix_op: Vec<u8>, target_off: usize },
+    Branch {
+        cond: u8,
+        target_off: usize,
+    },
+    CallRel {
+        target_off: usize,
+    },
+    PushOrMovTextVa {
+        prefix_op: Vec<u8>,
+        target_off: usize,
+    },
     Bytes(Vec<u8>),
 }
 
@@ -1636,11 +1670,48 @@ fn decode_ia32_fixed_or_modrm(
     sorted_prefixes: Vec<u8>,
 ) -> Option<(usize, Ia32NormInsn)> {
     let fixed_extra: Option<usize> = match op {
-        0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x27 | 0x2F | 0x37 | 0x3F
-        | 0x40..=0x5F | 0x60 | 0x61 | 0x90..=0x99 | 0x9B..=0x9F | 0xA4..=0xA7 | 0xAA..=0xAF
-        | 0xC3 | 0xCB | 0xCC | 0xCE | 0xCF | 0xD7 | 0xF4 | 0xF5 | 0xF8..=0xFD => Some(0),
-        0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C | 0x6A | 0xA8 | 0xB0..=0xB7
-        | 0xCD | 0xD4 | 0xD5 | 0xE4..=0xE7 => Some(1),
+        0x06
+        | 0x07
+        | 0x0E
+        | 0x16
+        | 0x17
+        | 0x1E
+        | 0x1F
+        | 0x27
+        | 0x2F
+        | 0x37
+        | 0x3F
+        | 0x40..=0x5F
+        | 0x60
+        | 0x61
+        | 0x90..=0x99
+        | 0x9B..=0x9F
+        | 0xA4..=0xA7
+        | 0xAA..=0xAF
+        | 0xC3
+        | 0xCB
+        | 0xCC
+        | 0xCE
+        | 0xCF
+        | 0xD7
+        | 0xF4
+        | 0xF5
+        | 0xF8..=0xFD => Some(0),
+        0x04
+        | 0x0C
+        | 0x14
+        | 0x1C
+        | 0x24
+        | 0x2C
+        | 0x34
+        | 0x3C
+        | 0x6A
+        | 0xA8
+        | 0xB0..=0xB7
+        | 0xCD
+        | 0xD4
+        | 0xD5
+        | 0xE4..=0xE7 => Some(1),
         0xC2 | 0xCA => Some(2),
         0xC8 => Some(3),
         0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D | 0x68 | 0xA9 | 0xB8..=0xBF => {
@@ -1655,12 +1726,8 @@ fn decode_ia32_fixed_or_modrm(
             return None;
         }
         if ex == 4 && (op == 0x68 || (0xB8..=0xBF).contains(&op)) {
-            let imm = u32::from_le_bytes([
-                bytes[p],
-                bytes[p + 1],
-                bytes[p + 2],
-                bytes[p + 3],
-            ]) as usize;
+            let imm =
+                u32::from_le_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]) as usize;
             if imm >= 0x0040_1000 && imm < 0x0040_1000_usize.saturating_add(bytes.len()) {
                 let mut pop = sorted_prefixes;
                 pop.push(op);
@@ -1716,11 +1783,10 @@ fn same_target_idx(
     )
 }
 
-fn decode_ia32_stream(bytes: &[u8]) -> Option<(Vec<Ia32NormInsn>, std::collections::HashMap<usize, usize>)> {
-    let trimmed_end = bytes
-        .iter()
-        .rposition(|&b| b != 0)
-        .map_or(0, |idx| idx + 1);
+fn decode_ia32_stream(
+    bytes: &[u8],
+) -> Option<(Vec<Ia32NormInsn>, std::collections::HashMap<usize, usize>)> {
+    let trimmed_end = bytes.iter().rposition(|&b| b != 0).map_or(0, |idx| idx + 1);
     let mut insns = Vec::new();
     let mut off_to_idx = std::collections::HashMap::new();
     let mut pc = 0_usize;
@@ -1779,9 +1845,10 @@ fn verify_ia32_stream_equiv(
                     target_off: t2,
                 },
             ) => c1 == c2 && same_target_idx(&b_map, *t1, &o_map, *t2),
-            (Ia32NormInsn::CallRel { target_off: t1 }, Ia32NormInsn::CallRel { target_off: t2 }) => {
-                same_target_idx(&b_map, *t1, &o_map, *t2)
-            }
+            (
+                Ia32NormInsn::CallRel { target_off: t1 },
+                Ia32NormInsn::CallRel { target_off: t2 },
+            ) => same_target_idx(&b_map, *t1, &o_map, *t2),
             (
                 Ia32NormInsn::PushOrMovTextVa {
                     prefix_op: p1,
@@ -2038,9 +2105,24 @@ fn check_arm32_pe_purity(
     let subsys_min = u16::from_le_bytes([bytes[opt + 50], bytes[opt + 51]]);
     let subsys = u16::from_le_bytes([bytes[opt + 68], bytes[opt + 69]]);
     let dll_chars = u16::from_le_bytes([bytes[opt + 70], bytes[opt + 71]]);
-    let rsrc_rva = u32::from_le_bytes([bytes[opt + 112], bytes[opt + 113], bytes[opt + 114], bytes[opt + 115]]);
-    let pdata_rva = u32::from_le_bytes([bytes[opt + 120], bytes[opt + 121], bytes[opt + 122], bytes[opt + 123]]);
-    let lcfg_rva = u32::from_le_bytes([bytes[opt + 176], bytes[opt + 177], bytes[opt + 178], bytes[opt + 179]]);
+    let rsrc_rva = u32::from_le_bytes([
+        bytes[opt + 112],
+        bytes[opt + 113],
+        bytes[opt + 114],
+        bytes[opt + 115],
+    ]);
+    let pdata_rva = u32::from_le_bytes([
+        bytes[opt + 120],
+        bytes[opt + 121],
+        bytes[opt + 122],
+        bytes[opt + 123],
+    ]);
+    let lcfg_rva = u32::from_le_bytes([
+        bytes[opt + 176],
+        bytes[opt + 177],
+        bytes[opt + 178],
+        bytes[opt + 179],
+    ]);
 
     if isa == CpuIsa::ArmV4 {
         if !matches!(subsys, 9 | 3) || subsys_maj != 4 || pdata_rva == 0 {
@@ -2080,9 +2162,24 @@ fn check_arm64_pe_purity(file_label: &str, bytes: &[u8], opt: usize) -> Result<(
     let subsys_min = u16::from_le_bytes([bytes[opt + 50], bytes[opt + 51]]);
     let subsys = u16::from_le_bytes([bytes[opt + 68], bytes[opt + 69]]);
     let dll_chars = u16::from_le_bytes([bytes[opt + 70], bytes[opt + 71]]);
-    let rsrc_rva = u32::from_le_bytes([bytes[opt + 128], bytes[opt + 129], bytes[opt + 130], bytes[opt + 131]]);
-    let pdata_rva = u32::from_le_bytes([bytes[opt + 136], bytes[opt + 137], bytes[opt + 138], bytes[opt + 139]]);
-    let lcfg_rva = u32::from_le_bytes([bytes[opt + 192], bytes[opt + 193], bytes[opt + 194], bytes[opt + 195]]);
+    let rsrc_rva = u32::from_le_bytes([
+        bytes[opt + 128],
+        bytes[opt + 129],
+        bytes[opt + 130],
+        bytes[opt + 131],
+    ]);
+    let pdata_rva = u32::from_le_bytes([
+        bytes[opt + 136],
+        bytes[opt + 137],
+        bytes[opt + 138],
+        bytes[opt + 139],
+    ]);
+    let lcfg_rva = u32::from_le_bytes([
+        bytes[opt + 192],
+        bytes[opt + 193],
+        bytes[opt + 194],
+        bytes[opt + 195],
+    ]);
     if subsys != 3 || subsys_maj != 10 || subsys_min != 0 {
         return Err(ToolError::AbiLint {
             span: SourceSpan::new(file_label, 1, 1),
@@ -2109,9 +2206,24 @@ fn check_pe64_purity(file_label: &str, bytes: &[u8], opt: usize) -> Result<(), T
     let subsys_min = u16::from_le_bytes([bytes[opt + 50], bytes[opt + 51]]);
     let subsys = u16::from_le_bytes([bytes[opt + 68], bytes[opt + 69]]);
     let dll_chars = u16::from_le_bytes([bytes[opt + 70], bytes[opt + 71]]);
-    let rsrc_rva = u32::from_le_bytes([bytes[opt + 128], bytes[opt + 129], bytes[opt + 130], bytes[opt + 131]]);
-    let pdata_rva = u32::from_le_bytes([bytes[opt + 136], bytes[opt + 137], bytes[opt + 138], bytes[opt + 139]]);
-    let lcfg_rva = u32::from_le_bytes([bytes[opt + 192], bytes[opt + 193], bytes[opt + 194], bytes[opt + 195]]);
+    let rsrc_rva = u32::from_le_bytes([
+        bytes[opt + 128],
+        bytes[opt + 129],
+        bytes[opt + 130],
+        bytes[opt + 131],
+    ]);
+    let pdata_rva = u32::from_le_bytes([
+        bytes[opt + 136],
+        bytes[opt + 137],
+        bytes[opt + 138],
+        bytes[opt + 139],
+    ]);
+    let lcfg_rva = u32::from_le_bytes([
+        bytes[opt + 192],
+        bytes[opt + 193],
+        bytes[opt + 194],
+        bytes[opt + 195],
+    ]);
     if subsys != 3 || subsys_maj != 5 || subsys_min != 2 {
         return Err(ToolError::AbiLint {
             span: SourceSpan::new(file_label, 1, 1),
@@ -2214,8 +2326,9 @@ fn check_ne_purity(file_label: &str, isa: CpuIsa, bytes: &[u8]) -> Result<(), To
                 return Err(ToolError::AbiLint {
                     span: SourceSpan::new(file_label, 1, 1),
                     proc_name: "<ne286>".into(),
-                    message: "multi-code-segment WINCMD286.EXE must mark transient segment DISCARDABLE"
-                        .into(),
+                    message:
+                        "multi-code-segment WINCMD286.EXE must mark transient segment DISCARDABLE"
+                            .into(),
                 });
             }
         }
@@ -2236,11 +2349,7 @@ fn check_ne_purity(file_label: &str, isa: CpuIsa, bytes: &[u8]) -> Result<(), To
 /// # Errors
 ///
 /// Returns [`ToolError::OpcodePurity`] or [`ToolError::AbiLint`] on any violation.
-pub fn verify_binary_purity(
-    file_label: &str,
-    isa: CpuIsa,
-    bytes: &[u8],
-) -> Result<(), ToolError> {
+pub fn verify_binary_purity(file_label: &str, isa: CpuIsa, bytes: &[u8]) -> Result<(), ToolError> {
     check_pe_purity(file_label, isa, bytes)?;
     check_ne_purity(file_label, isa, bytes)?;
     let code = extract_code_payload(bytes);
@@ -2315,7 +2424,10 @@ pub fn lint_directory(dir: &Path) -> Result<usize, ToolError> {
     for f in &files {
         let rel = f
             .strip_prefix(dir)
-            .map_or_else(|_| f.to_string_lossy().into_owned(), |p| p.to_string_lossy().into_owned())
+            .map_or_else(
+                |_| f.to_string_lossy().into_owned(),
+                |p| p.to_string_lossy().into_owned(),
+            )
             .replace(92 as char, "/");
         verify_fat83_rel_path(&rel)?;
         let text = fs::read_to_string(f)?;
@@ -2747,7 +2859,8 @@ mod tests {
 ";
         check_src(win16_ok)?;
 
-        let inc_ok = ";; @file c.inc\n;; @isa all\n;; @desc Inc.\n;; @const X\n;; @desc X\n@const X = 1\n";
+        let inc_ok =
+            ";; @file c.inc\n;; @isa all\n;; @desc Inc.\n;; @const X\n;; @desc X\n@const X = 1\n";
         check_src(inc_ok)
     }
 
@@ -2795,7 +2908,8 @@ mod tests {
         verify_binary_equivalence("empty", &[])?;
         verify_binary_equivalence("ok", &[("nasm", &[1, 2, 3]), ("fasm", &[1, 2, 3])])?;
         assert!(
-            verify_binary_equivalence("diff_byte", &[("nasm", &[1, 2]), ("fasm", &[1, 9])]).is_err()
+            verify_binary_equivalence("diff_byte", &[("nasm", &[1, 2]), ("fasm", &[1, 9])])
+                .is_err()
         );
         assert!(
             verify_binary_equivalence("diff_len", &[("nasm", &[1, 2]), ("fasm", &[1, 2, 3])])
@@ -2879,12 +2993,18 @@ ret
         // 8086 `mov ax, bx` in NASM/FASM (89 D8) vs JWasm (8B C3) + `test ax, bx` (85 D8 vs 85 C3)
         verify_binary_equivalence(
             "MOV_MOD11",
-            &[("nasm", &[0x89, 0xD8, 0x85, 0xD8]), ("jwasm", &[0x8B, 0xC3, 0x85, 0xC3])],
+            &[
+                ("nasm", &[0x89, 0xD8, 0x85, 0xD8]),
+                ("jwasm", &[0x8B, 0xC3, 0x85, 0xC3]),
+            ],
         )?;
         // x64 `mov rbx, r8` (4C 89 C3) vs (49 8B D8)
         verify_binary_equivalence(
             "X64_REX_MOD11",
-            &[("nasm", &[0x4C, 0x89, 0xC3]), ("jwasm", &[0x49, 0x8B, 0xD8])],
+            &[
+                ("nasm", &[0x4C, 0x89, 0xC3]),
+                ("jwasm", &[0x49, 0x8B, 0xD8]),
+            ],
         )?;
 
         // Synthetic minimal PE32+ image with .text and .pdata check
@@ -2968,7 +3088,13 @@ ret
             &mut out,
         )?;
         assert!(run_cli(["asm-lint", "--purity", "only_one"], &mut out).is_err());
-        assert!(run_cli(["asm-lint", "--purity", "bad_isa", &tmp.to_string_lossy()], &mut out).is_err());
+        assert!(
+            run_cli(
+                ["asm-lint", "--purity", "bad_isa", &tmp.to_string_lossy()],
+                &mut out
+            )
+            .is_err()
+        );
         let _ = fs::remove_file(&tmp);
         Ok(())
     }

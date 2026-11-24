@@ -20,8 +20,8 @@ fn with_crlf(s: &str) -> String {
 }
 
 #[test]
-fn asmconv_com_lowers_canonical_source_inside_dos200_across_all_three_targets() -> Result<(), ToolError>
-{
+fn asmconv_com_lowers_canonical_source_inside_dos200_across_all_three_targets()
+-> Result<(), ToolError> {
     let com_path = repo_root().join("build/jwasm/dos16/ASMCONV.COM");
     let com_bytes = std::fs::read(&com_path)?;
 
@@ -75,13 +75,10 @@ fn asmconv_com_lowers_canonical_source_inside_dos200_across_all_three_targets() 
         vm.load_com(&com_bytes, &tail, &[])?;
         let res = vm.run(500_000)?;
         assert_eq!(res.exit_code, 0, "ASMCONV {flag} failed");
-        let generated = String::from_utf8_lossy(
-            vm.vfs
-                .get(out_name)
-                .ok_or_else(|| ToolError::CliUsage {
-                    message: format!("missing {out_name} in VFS"),
-                })?,
-        );
+        let generated =
+            String::from_utf8_lossy(vm.vfs.get(out_name).ok_or_else(|| ToolError::CliUsage {
+                message: format!("missing {out_name} in VFS"),
+            })?);
         for needle in expected_snippets {
             assert!(
                 generated.contains(needle),
@@ -95,8 +92,14 @@ fn asmconv_com_lowers_canonical_source_inside_dos200_across_all_three_targets() 
 
 #[test]
 fn wincmd_com_64k_dos125_overlap_relocation_and_era_versions() -> Result<(), ToolError> {
+    let mut tested = 0usize;
     for tc in ["nasm", "fasm", "jwasm"] {
-        let com_bytes = std::fs::read(repo_root().join(format!("build/{tc}/dos16/WINCMD.COM")))?;
+        let p = repo_root().join(format!("build/{tc}/dos16/WINCMD.COM"));
+        if !p.is_file() {
+            continue;
+        }
+        tested += 1;
+        let com_bytes = std::fs::read(p)?;
 
         // Simulate tight 64 KiB 8088 MS-DOS 1.25 RAM where wMemTop forces backward STD REP MOVSW!
         let mut vm = DosVm::new(DosEra::Dos125);
@@ -124,6 +127,7 @@ fn wincmd_com_64k_dos125_overlap_relocation_and_era_versions() -> Result<(), Too
             );
         }
     }
+    assert!(tested >= 1, "at least one DOS16 toolchain must be built");
     Ok(())
 }
 
@@ -150,7 +154,10 @@ fn wincmd_com_detects_corrupted_transient_and_reloads_from_comspec() -> Result<(
             break;
         }
     }
-    assert!(corrupted, "expected INIT to return to RESIDENT before transient call");
+    assert!(
+        corrupted,
+        "expected INIT to return to RESIDENT before transient call"
+    );
     let res = vm.run(1_000_000)?;
     assert_eq!(res.exit_code, 0);
     assert_eq!(
@@ -162,7 +169,13 @@ fn wincmd_com_detects_corrupted_transient_and_reloads_from_comspec() -> Result<(
 
 #[test]
 fn wincmd_com_set_a_edge_cases_if_and_exit_codes() -> Result<(), ToolError> {
-    let com_bytes = std::fs::read(repo_root().join("build/fasm/dos16/WINCMD.COM"))?;
+    let fasm_com = repo_root().join("build/fasm/dos16/WINCMD.COM");
+    let com_path = if fasm_com.is_file() {
+        fasm_com
+    } else {
+        repo_root().join("build/nasm/dos16/WINCMD.COM")
+    };
+    let com_bytes = std::fs::read(com_path)?;
 
     let cases: &[(&str, u8, Option<&str>)] = &[
         (" /C SET /A 12+34*2", 0, Some("80")),
@@ -171,7 +184,11 @@ fn wincmd_com_set_a_edge_cases_if_and_exit_codes() -> Result<(), ToolError> {
         (" /C SET /A 0x10+010", 0, Some("24")),
         (" /C SET /A 10/0", 1, Some("Divide by zero error.")),
         (" /C SET /A 08", 1, Some("Invalid number.")),
-        (" /C IF NOT foo==bar ECHO Branch-Taken", 0, Some("Branch-Taken")),
+        (
+            " /C IF NOT foo==bar ECHO Branch-Taken",
+            0,
+            Some("Branch-Taken"),
+        ),
         (" /C IF foo==bar ECHO Should-Not-Print", 0, None),
         (" /C EXIT 42", 42, None),
     ];

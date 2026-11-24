@@ -116,7 +116,13 @@ fn build_modrm_or_riprel(
     if (modrm & 0xC7) == 0x05 {
         head_prefix.push(modrm);
         let imm_tail = bytes[p + 5..end].to_vec();
-        return Some((end - pc, X64NormInsn::RipRel { head: head_prefix, imm_tail }));
+        return Some((
+            end - pc,
+            X64NormInsn::RipRel {
+                head: head_prefix,
+                imm_tail,
+            },
+        ));
     }
     head_prefix.extend_from_slice(&bytes[p..end]);
     Some((end - pc, X64NormInsn::Bytes(head_prefix)))
@@ -163,7 +169,10 @@ fn decode_x64_insn(bytes: &[u8], pc: usize) -> Option<(usize, X64NormInsn)> {
         if b == 0x66 {
             has_66 = true;
             p += 1;
-        } else if matches!(b, 0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x67 | 0xF0 | 0xF2 | 0xF3) {
+        } else if matches!(
+            b,
+            0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x67 | 0xF0 | 0xF2 | 0xF3
+        ) {
             p += 1;
         } else {
             break;
@@ -193,10 +202,32 @@ fn decode_x64_insn(bytes: &[u8], pc: usize) -> Option<(usize, X64NormInsn)> {
     }
 
     let fixed_extra: Option<usize> = match op {
-        0x50..=0x5F | 0x90..=0x99 | 0x9B..=0x9F | 0xA4..=0xA7 | 0xAA..=0xAF | 0xC3 | 0xCB
-        | 0xCC | 0xCF | 0xD7 | 0xF4 | 0xF5 | 0xF8..=0xFD => Some(0),
-        0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C | 0x6A | 0xA8 | 0xB0..=0xB7
-        | 0xCD | 0xE4..=0xE7 => Some(1),
+        0x50..=0x5F
+        | 0x90..=0x99
+        | 0x9B..=0x9F
+        | 0xA4..=0xA7
+        | 0xAA..=0xAF
+        | 0xC3
+        | 0xCB
+        | 0xCC
+        | 0xCF
+        | 0xD7
+        | 0xF4
+        | 0xF5
+        | 0xF8..=0xFD => Some(0),
+        0x04
+        | 0x0C
+        | 0x14
+        | 0x1C
+        | 0x24
+        | 0x2C
+        | 0x34
+        | 0x3C
+        | 0x6A
+        | 0xA8
+        | 0xB0..=0xB7
+        | 0xCD
+        | 0xE4..=0xE7 => Some(1),
         0xC2 | 0xCA => Some(2),
         0xC8 => Some(3),
         0xB8..=0xBF => Some(if rex_w { 8 } else { imm_word }),

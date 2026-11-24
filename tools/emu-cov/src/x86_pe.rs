@@ -162,14 +162,23 @@ impl X86PeVm {
         let opt_sz = usize::from(u16::from_le_bytes([pe[lfa + 20], pe[lfa + 21]]));
         let opt = lfa + 24;
         if opt + opt_sz > pe.len() {
-            return Err(emu_err(0, ErrCode::BadExeFormat, "truncated optional header"));
+            return Err(emu_err(
+                0,
+                ErrCode::BadExeFormat,
+                "truncated optional header",
+            ));
         }
         let magic = u16::from_le_bytes([pe[opt], pe[opt + 1]]);
         if (is_64bit && magic != 0x020B) || (!is_64bit && magic != 0x010B) {
-            return Err(emu_err(0, ErrCode::BadExeFormat, "mismatched PE32/PE32+ magic"));
+            return Err(emu_err(
+                0,
+                ErrCode::BadExeFormat,
+                "mismatched PE32/PE32+ magic",
+            ));
         }
 
-        let entry_rva = u32::from_le_bytes([pe[opt + 16], pe[opt + 17], pe[opt + 18], pe[opt + 19]]);
+        let entry_rva =
+            u32::from_le_bytes([pe[opt + 16], pe[opt + 17], pe[opt + 18], pe[opt + 19]]);
         let image_base = if is_64bit {
             u64::from_le_bytes([
                 pe[opt + 24],
@@ -207,12 +216,8 @@ impl X86PeVm {
         Self::map_pe_sections(pe, opt + opt_sz, num_secs, image_base, &mut mem)?;
 
         let imp_dd = opt + if is_64bit { 120 } else { 104 };
-        let imp_rva = u32::from_le_bytes([
-            pe[imp_dd],
-            pe[imp_dd + 1],
-            pe[imp_dd + 2],
-            pe[imp_dd + 3],
-        ]);
+        let imp_rva =
+            u32::from_le_bytes([pe[imp_dd], pe[imp_dd + 1], pe[imp_dd + 2], pe[imp_dd + 3]]);
         Ok(MappedPe {
             is_64bit,
             entry_rva,
@@ -318,8 +323,7 @@ impl X86PeVm {
         } = Self::map_pe_image(pe)?;
         Self::init_teb_and_peb(&mut mem, is_64bit)?;
 
-        let (thunks, next_thunk) =
-            Self::bind_imports(&mut mem, image_base, imp_rva, is_64bit)?;
+        let (thunks, next_thunk) = Self::bind_imports(&mut mem, image_base, imp_rva, is_64bit)?;
 
         let mut os = WinProcState::new(false, is_64bit, (10, 0, 19045), shared);
         os.self_exe = if is_64bit {
@@ -334,18 +338,24 @@ impl X86PeVm {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
-        os.child_runner = Some(Box::new(move |child_cmd, child_shared, in_h, out_h, err_h| {
-            let kv_refs: Vec<(&str, &str)> = env_copy
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            let mut child = Self::from_pe_bytes(&pe_copy, child_cmd, &kv_refs, child_shared)?;
-            let _ = child.os.bind_inherited_stdio(0, in_h);
-            let _ = child.os.bind_inherited_stdio(1, out_h);
-            let _ = child.os.bind_inherited_stdio(2, err_h);
-            let res = child.run(25_000_000)?;
-            Ok((res.exit_code, res.stdout.into_bytes(), res.stderr.into_bytes()))
-        }));
+        os.child_runner = Some(Box::new(
+            move |child_cmd, child_shared, in_h, out_h, err_h| {
+                let kv_refs: Vec<(&str, &str)> = env_copy
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                let mut child = Self::from_pe_bytes(&pe_copy, child_cmd, &kv_refs, child_shared)?;
+                let _ = child.os.bind_inherited_stdio(0, in_h);
+                let _ = child.os.bind_inherited_stdio(1, out_h);
+                let _ = child.os.bind_inherited_stdio(2, err_h);
+                let res = child.run(25_000_000)?;
+                Ok((
+                    res.exit_code,
+                    res.stdout.into_bytes(),
+                    res.stderr.into_bytes(),
+                ))
+            },
+        ));
 
         let mut regs = [0u64; 16];
         let mut init_sp = STACK_BASE + STACK_SIZE - 0x100;
@@ -386,53 +396,166 @@ impl X86PeVm {
 
     fn dynamic_stdcall_bytes(api: &str) -> u32 {
         match api {
-            "CloseHandle" | "DeleteFileW" | "DeleteFileA" | "FreeEnvironmentStringsW"
-            | "FreeEnvironmentStringsA" | "FreeLibrary" | "GetDriveTypeW" | "GetDriveTypeA"
-            | "GetFileAttributesW" | "GetFileAttributesA" | "GetFileType" | "GetLocalTime"
-            | "GetModuleHandleA" | "GetModuleHandleW" | "GetStdHandle" | "GlobalMemoryStatus"
-            | "GlobalMemoryStatusEx" | "IsDBCSLeadByte" | "LoadLibraryA" | "LoadLibraryW"
-            | "LocalFree" | "RegCloseKey" | "RemoveDirectoryW" | "RemoveDirectoryA"
-            | "RtlGetVersion" | "SetConsoleCP" | "SetConsoleOutputCP" | "SetConsoleTitleW"
-            | "SetConsoleTitleA" | "SetCurrentDirectoryW" | "SetCurrentDirectoryA"
-            | "SetEndOfFile" | "SetErrorMode" | "SetLastError" | "SetLocalTime"
-            | "SetUnhandledExceptionFilter" | "ShellExecuteExW" | "ShellExecuteExA" | "Sleep"
-            | "Wow64DisableWow64FsRedirection" | "Wow64RevertWow64FsRedirection"
-            | "FlushFileBuffers" | "FindClose" | "ExitProcess" => 4,
-            "CompareFileTime" | "FindFirstFileW" | "FindFirstFileA" | "FindNextFileW"
-            | "FindNextFileA" | "FindNextStreamW" | "GetCPInfo" | "GetComputerNameW"
-            | "GetComputerNameA" | "GetConsoleMode" | "GetConsoleScreenBufferInfo"
-            | "GetCurrentDirectoryW" | "GetCurrentDirectoryA" | "GetExitCodeProcess"
-            | "GetFileSize" | "GetFileSizeEx" | "GetMachineTypeAttributes" | "GetProcAddress"
-            | "GetTempPathW" | "GetTempPathA" | "IsDBCSLeadByteEx"
-            | "LocalFileTimeToFileTime" | "FileTimeToLocalFileTime" | "FileTimeToSystemTime"
-            | "SystemTimeToFileTime" | "MoveFileW" | "MoveFileA" | "RegDeleteKeyW"
-            | "RegDeleteValueW" | "SetConsoleCtrlHandler" | "SetConsoleCursorPosition"
-            | "SetConsoleMode" | "SetConsoleScreenBufferSize" | "SetConsoleTextAttribute"
-            | "SetEnvironmentVariableW" | "SetEnvironmentVariableA" | "SetFileAttributesW"
-            | "SetFileAttributesA" | "SetStdHandle" | "TerminateProcess"
-            | "WaitForSingleObject" | "CreateDirectoryW" | "CreateDirectoryA" => 8,
-            "CopyFileW" | "CopyFileA" | "CreateHardLinkW" | "CreateSymbolicLinkW"
-            | "GetComputerNameExW" | "GetEnvironmentVariableW" | "GetEnvironmentVariableA"
-            | "GetModuleFileNameW" | "GetModuleFileNameA" | "GetProcessMemoryInfo"
-            | "K32GetProcessMemoryInfo" | "GetShortPathNameW" | "GetShortPathNameA"
-            | "GetLongPathNameW" | "MoveFileExW" | "OpenProcessToken" | "RegDeleteKeyExW"
-            | "SetHandleInformation" | "VirtualFree" => 12,
-            "CreatePipe" | "FindFirstStreamW" | "GetDiskFreeSpaceExW" | "GetDiskFreeSpaceExA"
-            | "GetFinalPathNameByHandleW" | "GetFileTime" | "GetFullPathNameW"
-            | "GetFullPathNameA" | "LookupPrivilegeNameW" | "SetFilePointer" | "SetFileTime"
-            | "VirtualAlloc" | "WaitForMultipleObjects" => 16,
-            "CreatePseudoConsole" | "FillConsoleOutputAttribute"
-            | "FillConsoleOutputCharacterW" | "FillConsoleOutputCharacterA"
-            | "GetDiskFreeSpaceW" | "GetDiskFreeSpaceA" | "GetTokenInformation"
-            | "NtQueryInformationFile" | "ReadConsoleInputW" | "ReadConsoleInputA"
-            | "ReadConsoleW" | "ReadConsoleA" | "ReadFile" | "RegOpenKeyExW" | "RegOpenKeyExA"
-            | "SetFilePointerEx" | "WriteConsoleW" | "WriteConsoleA" | "WriteFile" => 20,
-            "CopyFileExW" | "CreateThread" | "FindFirstFileExW" | "MultiByteToWideChar"
-            | "RegQueryValueExW" | "RegQueryValueExA" | "RegSetValueExW" | "RegSetValueExA" => 24,
+            "CloseHandle"
+            | "DeleteFileW"
+            | "DeleteFileA"
+            | "FreeEnvironmentStringsW"
+            | "FreeEnvironmentStringsA"
+            | "FreeLibrary"
+            | "GetDriveTypeW"
+            | "GetDriveTypeA"
+            | "GetFileAttributesW"
+            | "GetFileAttributesA"
+            | "GetFileType"
+            | "GetLocalTime"
+            | "GetModuleHandleA"
+            | "GetModuleHandleW"
+            | "GetStdHandle"
+            | "GlobalMemoryStatus"
+            | "GlobalMemoryStatusEx"
+            | "IsDBCSLeadByte"
+            | "LoadLibraryA"
+            | "LoadLibraryW"
+            | "LocalFree"
+            | "RegCloseKey"
+            | "RemoveDirectoryW"
+            | "RemoveDirectoryA"
+            | "RtlGetVersion"
+            | "SetConsoleCP"
+            | "SetConsoleOutputCP"
+            | "SetConsoleTitleW"
+            | "SetConsoleTitleA"
+            | "SetCurrentDirectoryW"
+            | "SetCurrentDirectoryA"
+            | "SetEndOfFile"
+            | "SetErrorMode"
+            | "SetLastError"
+            | "SetLocalTime"
+            | "SetUnhandledExceptionFilter"
+            | "ShellExecuteExW"
+            | "ShellExecuteExA"
+            | "Sleep"
+            | "Wow64DisableWow64FsRedirection"
+            | "Wow64RevertWow64FsRedirection"
+            | "FlushFileBuffers"
+            | "FindClose"
+            | "ExitProcess" => 4,
+            "CompareFileTime"
+            | "FindFirstFileW"
+            | "FindFirstFileA"
+            | "FindNextFileW"
+            | "FindNextFileA"
+            | "FindNextStreamW"
+            | "GetCPInfo"
+            | "GetComputerNameW"
+            | "GetComputerNameA"
+            | "GetConsoleMode"
+            | "GetConsoleScreenBufferInfo"
+            | "GetCurrentDirectoryW"
+            | "GetCurrentDirectoryA"
+            | "GetExitCodeProcess"
+            | "GetFileSize"
+            | "GetFileSizeEx"
+            | "GetMachineTypeAttributes"
+            | "GetProcAddress"
+            | "GetTempPathW"
+            | "GetTempPathA"
+            | "IsDBCSLeadByteEx"
+            | "LocalFileTimeToFileTime"
+            | "FileTimeToLocalFileTime"
+            | "FileTimeToSystemTime"
+            | "SystemTimeToFileTime"
+            | "MoveFileW"
+            | "MoveFileA"
+            | "RegDeleteKeyW"
+            | "RegDeleteValueW"
+            | "SetConsoleCtrlHandler"
+            | "SetConsoleCursorPosition"
+            | "SetConsoleMode"
+            | "SetConsoleScreenBufferSize"
+            | "SetConsoleTextAttribute"
+            | "SetEnvironmentVariableW"
+            | "SetEnvironmentVariableA"
+            | "SetFileAttributesW"
+            | "SetFileAttributesA"
+            | "SetStdHandle"
+            | "TerminateProcess"
+            | "WaitForSingleObject"
+            | "CreateDirectoryW"
+            | "CreateDirectoryA" => 8,
+            _ => Self::dynamic_stdcall_bytes_many(api),
+        }
+    }
+
+    fn dynamic_stdcall_bytes_many(api: &str) -> u32 {
+        match api {
+            "CopyFileW"
+            | "CopyFileA"
+            | "CreateHardLinkW"
+            | "CreateSymbolicLinkW"
+            | "GetComputerNameExW"
+            | "GetEnvironmentVariableW"
+            | "GetEnvironmentVariableA"
+            | "GetModuleFileNameW"
+            | "GetModuleFileNameA"
+            | "GetProcessMemoryInfo"
+            | "K32GetProcessMemoryInfo"
+            | "GetShortPathNameW"
+            | "GetShortPathNameA"
+            | "GetLongPathNameW"
+            | "MoveFileExW"
+            | "OpenProcessToken"
+            | "RegDeleteKeyExW"
+            | "SetHandleInformation"
+            | "VirtualFree" => 12,
+            "CreatePipe"
+            | "FindFirstStreamW"
+            | "GetDiskFreeSpaceExW"
+            | "GetDiskFreeSpaceExA"
+            | "GetFinalPathNameByHandleW"
+            | "GetFileTime"
+            | "GetFullPathNameW"
+            | "GetFullPathNameA"
+            | "LookupPrivilegeNameW"
+            | "SetFilePointer"
+            | "SetFileTime"
+            | "VirtualAlloc"
+            | "WaitForMultipleObjects" => 16,
+            "CreatePseudoConsole"
+            | "FillConsoleOutputAttribute"
+            | "FillConsoleOutputCharacterW"
+            | "FillConsoleOutputCharacterA"
+            | "GetDiskFreeSpaceW"
+            | "GetDiskFreeSpaceA"
+            | "GetTokenInformation"
+            | "NtQueryInformationFile"
+            | "ReadConsoleInputW"
+            | "ReadConsoleInputA"
+            | "ReadConsoleW"
+            | "ReadConsoleA"
+            | "ReadFile"
+            | "RegOpenKeyExW"
+            | "RegOpenKeyExA"
+            | "SetFilePointerEx"
+            | "WriteConsoleW"
+            | "WriteConsoleA"
+            | "WriteFile" => 20,
+            "CopyFileExW"
+            | "CreateThread"
+            | "FindFirstFileExW"
+            | "MultiByteToWideChar"
+            | "RegQueryValueExW"
+            | "RegQueryValueExA"
+            | "RegSetValueExW"
+            | "RegSetValueExA" => 24,
             "CreateFileW" | "CreateFileA" | "DuplicateHandle" | "FormatMessageW"
             | "FormatMessageA" | "LookupAccountSidW" => 28,
-            "DeviceIoControl" | "GetVolumeInformationW" | "GetVolumeInformationA"
-            | "RegEnumKeyExW" | "RegEnumValueW" | "WideCharToMultiByte" => 32,
+            "DeviceIoControl"
+            | "GetVolumeInformationW"
+            | "GetVolumeInformationA"
+            | "RegEnumKeyExW"
+            | "RegEnumValueW"
+            | "WideCharToMultiByte" => 32,
             "RegCreateKeyExW" | "RegCreateKeyExA" => 36,
             "CreateProcessW" | "CreateProcessA" => 40,
             _ => 0,
@@ -749,24 +872,20 @@ impl X86PeVm {
         }
         let mut next_t = self.next_thunk;
         let thunks_ref = &mut self.thunks;
-        let ret = self.os.dispatch_api(
-            &mut self.mem,
-            api_name,
-            &[],
-            stack_base,
-            &mut |dyn_fn| {
-                for (&addr, (existing, _)) in thunks_ref.iter() {
-                    if existing == dyn_fn {
-                        return addr;
+        let ret =
+            self.os
+                .dispatch_api(&mut self.mem, api_name, &[], stack_base, &mut |dyn_fn| {
+                    for (&addr, (existing, _)) in thunks_ref.iter() {
+                        if existing == dyn_fn {
+                            return addr;
+                        }
                     }
-                }
-                let addr = next_t;
-                next_t = next_t.wrapping_add(16);
-                let pop_b = Self::dynamic_stdcall_bytes(dyn_fn);
-                thunks_ref.insert(addr, (dyn_fn.to_owned(), pop_b));
-                addr
-            },
-        )?;
+                    let addr = next_t;
+                    next_t = next_t.wrapping_add(16);
+                    let pop_b = Self::dynamic_stdcall_bytes(dyn_fn);
+                    thunks_ref.insert(addr, (dyn_fn.to_owned(), pop_b));
+                    addr
+                })?;
         self.next_thunk = next_t;
         self.regs[4] = stack_base.wrapping_add(u64::from(pop_bytes)) & 0xFFFF_FFFF;
         self.regs[0] = ret & 0xFFFF_FFFF;
@@ -824,7 +943,9 @@ impl X86PeVm {
 
     fn write_mem_sized(&mut self, addr: u64, bits: u8, val: u64) -> Result<(), ToolError> {
         match bits {
-            8 => self.mem.write_u8(addr, u8::try_from(val & 0xFF).unwrap_or(0)),
+            8 => self
+                .mem
+                .write_u8(addr, u8::try_from(val & 0xFF).unwrap_or(0)),
             16 => self
                 .mem
                 .write_u16_le(addr, u16::try_from(val & 0xFFFF).unwrap_or(0)),
@@ -993,7 +1114,11 @@ impl X86PeVm {
         let eff = seg_base.wrapping_add(base_addr.wrapping_add_signed(disp));
         Ok((
             reg,
-            OpOperand::AbsAddr(if self.is_64bit { eff } else { eff & 0xFFFF_FFFF }),
+            OpOperand::AbsAddr(if self.is_64bit {
+                eff
+            } else {
+                eff & 0xFFFF_FFFF
+            }),
         ))
     }
 
@@ -1164,11 +1289,7 @@ impl X86PeVm {
             7 => {
                 // SAR
                 let cf = ((v >> (cnt - 1)) & 1) != 0;
-                let sext = if (v & sb) != 0 {
-                    v | !mask
-                } else {
-                    v
-                };
+                let sext = if (v & sb) != 0 { v | !mask } else { v };
                 let res = ((sext.cast_signed() >> cnt).cast_unsigned()) & mask;
                 self.flags &= !(CF | OF);
                 if cf {
@@ -1361,7 +1482,8 @@ impl X86PeVm {
                 } else if op16 {
                     let sp = (self.regs[4].wrapping_sub(2)) & 0xFFFF_FFFF;
                     self.regs[4] = sp;
-                    self.mem.write_u16_le(sp, lo_u16(self.regs[usize::from(r)]))?;
+                    self.mem
+                        .write_u16_le(sp, lo_u16(self.regs[usize::from(r)]))?;
                 } else {
                     self.push_u32(lo_u32(self.regs[usize::from(r)]))?;
                 }
@@ -1529,7 +1651,11 @@ impl X86PeVm {
             },
             0x99 => match op_bits {
                 16 => {
-                    let s = if (self.regs[0] & 0x8000) != 0 { 0xFFFF } else { 0 };
+                    let s = if (self.regs[0] & 0x8000) != 0 {
+                        0xFFFF
+                    } else {
+                        0
+                    };
                     self.write_reg(2, 16, has_rex, s);
                 }
                 32 => {
@@ -1575,17 +1701,33 @@ impl X86PeVm {
             1
         };
         for _ in 0..iters {
-            let si = if self.is_64bit { self.regs[6] } else { self.regs[6] & 0xFFFF_FFFF };
-            let di = if self.is_64bit { self.regs[7] } else { self.regs[7] & 0xFFFF_FFFF };
+            let si = if self.is_64bit {
+                self.regs[6]
+            } else {
+                self.regs[6] & 0xFFFF_FFFF
+            };
+            let di = if self.is_64bit {
+                self.regs[7]
+            } else {
+                self.regs[7] & 0xFFFF_FFFF
+            };
             if opcode <= 0xA5 {
                 let v = self.read_mem_sized(si, elem_bits)?;
                 self.write_mem_sized(di, elem_bits, v)?;
-                self.regs[6] = if df { si.wrapping_sub(step) } else { si.wrapping_add(step) };
+                self.regs[6] = if df {
+                    si.wrapping_sub(step)
+                } else {
+                    si.wrapping_add(step)
+                };
             } else {
                 let v = self.read_reg(0, elem_bits, ctx.has_rex());
                 self.write_mem_sized(di, elem_bits, v)?;
             }
-            self.regs[7] = if df { di.wrapping_sub(step) } else { di.wrapping_add(step) };
+            self.regs[7] = if df {
+                di.wrapping_sub(step)
+            } else {
+                di.wrapping_add(step)
+            };
         }
         if is_rep {
             self.regs[1] = 0;
@@ -1689,8 +1831,16 @@ impl X86PeVm {
         } = ctx;
         match opcode {
             0xC2 | 0xC3 => {
-                let pop_extra = if opcode == 0xC2 { u64::from(self.fetch_u16(cur)?) } else { 0 };
-                let ret_addr = if self.is_64bit { self.pop_u64()? } else { u64::from(self.pop_u32()?) };
+                let pop_extra = if opcode == 0xC2 {
+                    u64::from(self.fetch_u16(cur)?)
+                } else {
+                    0
+                };
+                let ret_addr = if self.is_64bit {
+                    self.pop_u64()?
+                } else {
+                    u64::from(self.pop_u32()?)
+                };
                 self.regs[4] = self.regs[4].wrapping_add(pop_extra);
                 if !self.is_64bit {
                     self.regs[4] &= 0xFFFF_FFFF;
@@ -1710,13 +1860,21 @@ impl X86PeVm {
             }
             0xC9 => {
                 self.regs[4] = self.regs[5];
-                self.regs[5] = if self.is_64bit { self.pop_u64()? } else { u64::from(self.pop_u32()?) };
+                self.regs[5] = if self.is_64bit {
+                    self.pop_u64()?
+                } else {
+                    u64::from(self.pop_u32()?)
+                };
                 self.ip = *cur;
             }
             0xD0..=0xD3 => {
                 let bits = if (opcode & 1) == 0 { 8 } else { op_bits };
                 let (subop, rm) = self.decode_modrm(cur, rex, seg_base)?;
-                let cnt = if (opcode & 2) == 0 { 1 } else { self.regs[1] & 0xFF };
+                let cnt = if (opcode & 2) == 0 {
+                    1
+                } else {
+                    self.regs[1] & 0xFF
+                };
                 let v = self.read_op(rm, bits, has_rex, *cur)?;
                 let res = self.shift_op(subop & 7, v, cnt, bits);
                 self.write_op(rm, bits, has_rex, *cur, res)?;
@@ -1739,10 +1897,9 @@ impl X86PeVm {
                 };
                 self.ip = cur.wrapping_add_signed(rel);
             }
-            0xF8 => { self.flags &= !CF; self.ip = *cur; }
-            0xF9 => { self.flags |= CF; self.ip = *cur; }
-            0xFC => { self.flags &= !DF; self.ip = *cur; }
-            0xFD => { self.flags |= DF; self.ip = *cur; }
+            0xF8..=0xFD if matches!(opcode, 0xF8 | 0xF9 | 0xFC | 0xFD) => {
+                self.apply_flag_opcode(opcode, *cur);
+            }
             0xF6 | 0xF7 => self.step_grp3(opcode, cur, ctx)?,
             0xFE | 0xFF => self.step_grp45(opcode, cur, ctx)?,
             other => {
@@ -1754,6 +1911,16 @@ impl X86PeVm {
             }
         }
         Ok(())
+    }
+
+    const fn apply_flag_opcode(&mut self, opcode: u8, next_ip: u64) {
+        match opcode {
+            0xF8 => self.flags &= !CF,
+            0xF9 => self.flags |= CF,
+            0xFC => self.flags &= !DF,
+            _ => self.flags |= DF,
+        }
+        self.ip = next_ip;
     }
 
     fn step_grp3(&mut self, opcode: u8, cur: &mut u64, ctx: DecodeCtx) -> Result<(), ToolError> {
@@ -1898,7 +2065,11 @@ impl X86PeVm {
                 if let Some(edges) = branch_edges {
                     let _ = edges.insert((insn_pc, taken));
                 }
-                self.ip = if taken { cur.wrapping_add_signed(rel) } else { *cur };
+                self.ip = if taken {
+                    cur.wrapping_add_signed(rel)
+                } else {
+                    *cur
+                };
             }
             0x90..=0x9F => {
                 let (_, rm) = self.decode_modrm(cur, rex, seg_base)?;
@@ -2066,7 +2237,11 @@ impl X86PeVm {
 
     fn exec_div(&mut self, b: u64, bits: u8, signed: bool, has_rex: bool) -> Result<(), ToolError> {
         if b == 0 {
-            return Err(emu_err(self.ip, ErrCode::GeneralFailure, "x86 divide by zero"));
+            return Err(emu_err(
+                self.ip,
+                ErrCode::GeneralFailure,
+                "x86 divide by zero",
+            ));
         }
         if signed {
             let num: i128 = match bits {

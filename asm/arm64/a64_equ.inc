@@ -255,7 +255,8 @@
     @field dwSavedCodePage, dword, 1
     @field bIsCallSub, byte, 1
     @field bBomKind, byte, 1
-    @field bPad, byte, 14
+    @field bJumped, byte, 1
+    @field bPad, byte, 13
 @endstruc
 
 ;; @struc SETLOCAL_SNAP_A64

@@ -266,7 +266,13 @@ pub fn build_fat12_floppy(
 
         let dir_off = root_off + (idx + 1) * 32;
         let sz32 = u32::try_from(payload.len()).unwrap_or(u32::MAX);
-        write_dir_entry(&mut img[dir_off..dir_off + 32], &fcb, 0x20, first_clus, sz32);
+        write_dir_entry(
+            &mut img[dir_off..dir_off + 32],
+            &fcb,
+            0x20,
+            first_clus,
+            sz32,
+        );
     }
 
     let fat_len = fat.len();
@@ -321,8 +327,12 @@ pub fn read_fat12_root_files(
         if first_b == 0xE5 || (img[e + 11] & 0x18) != 0 {
             continue;
         }
-        let stem = String::from_utf8_lossy(&img[e..e + 8]).trim_end().to_owned();
-        let ext = String::from_utf8_lossy(&img[e + 8..e + 11]).trim_end().to_owned();
+        let stem = String::from_utf8_lossy(&img[e..e + 8])
+            .trim_end()
+            .to_owned();
+        let ext = String::from_utf8_lossy(&img[e + 8..e + 11])
+            .trim_end()
+            .to_owned();
         let full = if ext.is_empty() {
             stem
         } else {

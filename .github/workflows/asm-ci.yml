@@ -148,6 +148,7 @@ jobs:
             os: ubuntu-latest
             profile: linux-full
             toolchain: all
+            cache_tag: all
             target: all
             upload_artifacts: true
 
@@ -155,6 +156,7 @@ jobs:
             os: ubuntu-24.04-arm
             profile: linux-subset
             toolchain: nasm,jwasm,llvm
+            cache_tag: nasm-jwasm-llvm
             target: all
             experimental: true
 
@@ -162,30 +164,35 @@ jobs:
             os: macos-latest
             profile: macos
             toolchain: nasm,jwasm,llvm
+            cache_tag: nasm-jwasm-llvm
             target: all
 
           - name: Win 2025 x64 | Native NASM + FASM + JWasm + FASMARM + LLVM | Real Win32/Win64 Exec
             os: windows-2025
             profile: windows-native
             toolchain: all
+            cache_tag: all
             target: all
 
           - name: Win 2022 x64 | Native BUILD.CMD (NASM + FASM + JWasm) | Real Win32/Win64 Exec
             os: windows-2022
             profile: windows-native
             toolchain: nasm,fasm,jwasm
+            cache_tag: nasm-fasm-jwasm
             target: dos16,win16,x86_32,x86_64
 
           - name: Win Cygwin | NASM | DOS16 + Win16
             os: windows-2025
             profile: windows-cygwin
             toolchain: nasm
+            cache_tag: nasm
             target: dos16,win16
 
           - name: Win 11 ARM64 | LLVM + Native WINCMD_ARM64.EXE Execution
             os: windows-11-arm
             profile: windows-arm64
             toolchain: llvm
+            cache_tag: llvm
             target: arm64
             experimental: true
 
@@ -221,7 +228,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/wincmd-toolchains
-          key: wincmd-tc-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.toolchain }}
+          key: wincmd-tc-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.cache_tag }}
 
       - name: Install Linux Dependencies (NASM, LLVM, LLD, Wine, dos2unix)
         if: runner.os == 'Linux'
@@ -237,12 +244,17 @@ jobs:
             sudo apt-get install -y --no-install-recommends wine wine64 wine32:i386 || true
           fi
 
-      - name: Install macOS Dependencies (NASM, LLVM, dos2unix)
+      - name: Install macOS Dependencies (NASM, LLVM, LLD, dos2unix)
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
         run: |
           set -euo pipefail
-          brew install nasm llvm dos2unix ${{ inputs.extra_brew_packages }}
+          for pkg in nasm llvm lld dos2unix ${{ inputs.extra_brew_packages }}; do
+            brew list --versions "$pkg" >/dev/null 2>&1 || brew install "$pkg"
+          done
 
       - name: Install Extra Winget Packages
         if: runner.os == 'Windows' && inputs.extra_winget_packages != ''
@@ -275,6 +287,38 @@ jobs:
             $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
           }
 
+          function Invoke-DownloadFile([string]$Url, [string]$OutFile) {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+            $gitCurl = 'C:\Program Files\Git\mingw64\bin\curl.exe'
+            if (-not (Test-Path $gitCurl)) {
+              $gitCurl = 'C:\Program Files\Git\usr\bin\curl.exe'
+            }
+            if (Test-Path $gitCurl) {
+              $prevBackend = $env:CURL_SSL_BACKEND
+              $env:CURL_SSL_BACKEND = 'openssl'
+              & $gitCurl -fsSL --tlsv1.2 --tls-max 1.2 --ciphers 'DEFAULT:@SECLEVEL=1' --retry 4 --retry-all-errors $Url -o $OutFile 2>$null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutFile)) {
+                & $gitCurl -fsSL --tlsv1.2 --retry 4 --retry-all-errors $Url -o $OutFile
+              }
+              $env:CURL_SSL_BACKEND = $prevBackend
+              if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 1024)) { return }
+            }
+            & curl.exe -fsSL --ssl-no-revoke --tlsv1.2 --retry 3 $Url -o $OutFile
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 1024)) { return }
+            if ($Url -match '^https://(arm\.)?flatassembler\.net/') {
+              $httpUrl = $Url -replace '^https://', 'http://'
+              & curl.exe -fsSL --retry 3 $httpUrl -o $OutFile
+              if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 65536)) {
+                $hdr = Get-Content -Path $OutFile -AsByteStream -TotalCount 2
+                if ($hdr.Count -eq 2 -and $hdr[0] -eq 0x50 -and $hdr[1] -eq 0x4B) { return }
+              }
+            }
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
+            if (-not (Test-Path $OutFile) -or ((Get-Item $OutFile).Length -le 1024)) {
+              throw "Failed to download $Url to $OutFile"
+            }
+          }
+
           if ('${{ matrix.profile }}' -eq 'windows-native') {
             if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
               choco install nasm -y --no-progress
@@ -290,38 +334,38 @@ jobs:
             if (-not (Test-Path (Join-Path $fasmDir 'FASM.EXE'))) {
               New-Item -ItemType Directory -Force -Path $fasmDir | Out-Null
               $fasmZip = Join-Path $tcRoot 'fasmw.zip'
-              curl.exe -fsSL https://flatassembler.net/fasmw17332.zip -o $fasmZip
+              Invoke-DownloadFile 'https://flatassembler.net/fasmw17332.zip' $fasmZip
               Expand-Archive -Path $fasmZip -DestinationPath $fasmDir -Force
             }
             Add-Content -Path $env:GITHUB_PATH -Value $fasmDir
-            Add-Content -Path $env:GITHUB_ENV -Value "INCLUDE=$fasmDir\INCLUDE"
             $env:PATH = "$fasmDir;$env:PATH"
-            $env:INCLUDE = "$fasmDir\INCLUDE"
 
             if ('${{ matrix.toolchain }}' -eq 'all') {
               $fasmarmDir = Join-Path $tcRoot 'fasmarm'
               if (-not (Test-Path (Join-Path $fasmarmDir 'FASMARM.EXE'))) {
                 New-Item -ItemType Directory -Force -Path $fasmarmDir | Out-Null
                 $fasmarmZip = Join-Path $tcRoot 'fasmarm.zip'
-                curl.exe -fsSL https://arm.flatassembler.net/FASMARM_small.ZIP -o $fasmarmZip
+                Invoke-DownloadFile 'https://arm.flatassembler.net/FASMARM_small.ZIP' $fasmarmZip
                 Expand-Archive -Path $fasmarmZip -DestinationPath $fasmarmDir -Force
                 Copy-Item -Path "$fasmDir\SOURCE\*" -Destination "$fasmarmDir\source" -Recurse -Force -ErrorAction SilentlyContinue
                 Push-Location "$fasmarmDir\source\Win32"
                 & "$fasmDir\FASM.EXE" fasmarm.asm "$fasmarmDir\FASMARM.EXE"
+                if ($LASTEXITCODE -ne 0) { throw "Failed to assemble FASMARM.EXE" }
                 Pop-Location
               }
               Add-Content -Path $env:GITHUB_PATH -Value $fasmarmDir
-              Add-Content -Path $env:GITHUB_ENV -Value "INCLUDE=$fasmDir\INCLUDE;$fasmarmDir\include"
+              $env:PATH = "$fasmarmDir;$env:PATH"
             }
 
             if (-not (Test-Path (Join-Path $tcBin 'jwasm.exe'))) {
               $jwTar = Join-Path $tcRoot 'jwasm.tar.gz'
-              curl.exe -fsSL https://github.com/Baron-von-Riedesel/JWasm/archive/refs/heads/master.tar.gz -o $jwTar
-              tar.exe -xzf $jwTar -C $tcRoot
+              Invoke-DownloadFile 'https://github.com/Baron-von-Riedesel/JWasm/archive/refs/heads/master.tar.gz' $jwTar
+              & tar.exe -xzf $jwTar -C $tcRoot
+              if ($LASTEXITCODE -ne 0) { throw "Failed to extract JWasm archive" }
               $jwSrcDir = Join-Path $tcRoot 'JWasm-master\src'
               $cFiles = Get-ChildItem -Path $jwSrcDir -Filter '*.c' | Where-Object { $_.Name -ne 'trmem.c' } | ForEach-Object { $_.FullName }
-              & clang -O2 -DNDEBUG -D__NT__ -w -I"$jwSrcDir\H" -I"$jwSrcDir" @cFiles -o (Join-Path $tcBin 'jwasm.exe')
-              if ($LASTEXITCODE -ne 0) { throw "Failed to build jwasm.exe" }
+              & clang -O2 -DNDEBUG -D__NT__ -D_CRT_SECURE_NO_WARNINGS -w -I"$jwSrcDir\H" -I"$jwSrcDir" @cFiles -o (Join-Path $tcBin 'jwasm.exe')
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $tcBin 'jwasm.exe'))) { throw "Failed to build jwasm.exe" }
             }
             Add-Content -Path $env:GITHUB_PATH -Value $tcBin
           }
@@ -358,6 +402,7 @@ jobs:
           if [ "${{ matrix.upload_artifacts }}" = "true" ]; then
             cargo run --release --quiet -p media-pkg -- --root . --build-dir build --dist-src dist/src --out-dir dist/release
           fi
+          export PATH="$WINCMD_TC_DIR/bin:$PATH"
           cargo test --workspace
 
       - name: Smoke Test Win32 & Win64 Binaries via Wine (Linux x64)
@@ -379,36 +424,25 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          cmd /c "BUILD.CMD"
-          if ($LASTEXITCODE -ne 0) { throw "BUILD.CMD failed with exit code $LASTEXITCODE" }
-
-          New-Item -ItemType Directory -Force -Path build/libs, build/nasm/x86_32, build/fasm/x86_32, build/jwasm/x86_32, build/nasm/x86_64, build/jwasm/x86_64 | Out-Null
-          & llvm-dlltool -m i386 -k -d asm/tc/arm_ms/k32_x86.def -l build/libs/kernel32_x86.lib
-          & llvm-dlltool -m i386:x86-64 -d asm/tc/arm_ms/k32_base.def -l build/libs/kernel32_x64.lib
-
-          & nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/x86_32/ -f win32 dist/src/nasm/x86_32/wincmd32.asm -o build/nasm/x86_32/wincmd32.obj
-          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH:NO /ENTRY:mainCRTStartup build/nasm/x86_32/wincmd32.obj build/libs/kernel32_x86.lib /OUT:build/nasm/x86_32/WINCMD32.EXE
-
-          & fasm dist/src/fasm/x86_32/wincmd32.asm build/fasm/x86_32/wincmd32.obj
-          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH:NO /ENTRY:mainCRTStartup build/fasm/x86_32/wincmd32.obj build/libs/kernel32_x86.lib /OUT:build/fasm/x86_32/WINCMD32.EXE
-
-          & jwasm -q -WX -W4 -Idist/src/jwasm/x86_32 -coff -Fobuild/jwasm/x86_32/wincmd32.obj dist/src/jwasm/x86_32/wincmd32.asm
-          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH:NO /ENTRY:mainCRTStartup build/jwasm/x86_32/wincmd32.obj build/libs/kernel32_x86.lib /OUT:build/jwasm/x86_32/WINCMD32.EXE
-
-          & nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/x86_64/ -f win64 dist/src/nasm/x86_64/wincmd64.asm -o build/nasm/x86_64/wincmd64.obj
-          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,5.02 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup build/nasm/x86_64/wincmd64.obj build/libs/kernel32_x64.lib /OUT:build/nasm/x86_64/WINCMD64.EXE
-
-          & jwasm -q -WX -W4 -Idist/src/jwasm/x86_64 -win64 -Fobuild/jwasm/x86_64/wincmd64.obj dist/src/jwasm/x86_64/wincmd64.asm
-          & lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,5.02 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup build/jwasm/x86_64/wincmd64.obj build/libs/kernel32_x64.lib /OUT:build/jwasm/x86_64/WINCMD64.EXE
+          cmd /c "make.bat"
+          if ($LASTEXITCODE -ne 0) { throw "make.bat failed with exit code $LASTEXITCODE" }
 
           & cargo run --release --quiet -p asm-lint -- --equiv WINCMD.COM build/nasm/dos16/WINCMD.COM build/fasm/dos16/WINCMD.COM build/jwasm/dos16/WINCMD.COM
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD.COM equivalence failed" }
           & cargo run --release --quiet -p asm-lint -- --equiv ASMCONV.COM build/nasm/dos16/ASMCONV.COM build/fasm/dos16/ASMCONV.COM build/jwasm/dos16/ASMCONV.COM
+          if ($LASTEXITCODE -ne 0) { throw "ASMCONV.COM equivalence failed" }
           & cargo run --release --quiet -p asm-lint -- --equiv WINCMD16.EXE build/nasm/win16/WINCMD16.EXE build/fasm/win16/WINCMD16.EXE build/jwasm/win16/WINCMD16.EXE
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD16.EXE equivalence failed" }
           & cargo run --release --quiet -p asm-lint -- --equiv WINCMD286.EXE build/nasm/win16/WINCMD286.EXE build/fasm/win16/WINCMD286.EXE build/jwasm/win16/WINCMD286.EXE
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD286.EXE equivalence failed" }
           & cargo run --release --quiet -p asm-lint -- --equiv WINCMD32.EXE build/nasm/x86_32/WINCMD32.EXE build/fasm/x86_32/WINCMD32.EXE build/jwasm/x86_32/WINCMD32.EXE
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD32.EXE equivalence failed" }
           & cargo run --release --quiet -p asm-lint -- --equiv WINCMD64.EXE build/nasm/x86_64/WINCMD64.EXE build/fasm/x86_64/WINCMD64.EXE build/jwasm/x86_64/WINCMD64.EXE
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD64.EXE equivalence failed" }
           & cargo run --release --quiet -p asm-lint -- --purity 386 build/nasm/x86_32/WINCMD32.EXE
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD32.EXE purity failed" }
           & cargo run --release --quiet -p asm-lint -- --purity x64 build/nasm/x86_64/WINCMD64.EXE
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD64.EXE purity failed" }
 
           foreach ($exe in @('build/nasm/x86_32/WINCMD32.EXE', 'build/fasm/x86_32/WINCMD32.EXE', 'build/jwasm/x86_32/WINCMD32.EXE', 'build/nasm/x86_64/WINCMD64.EXE', 'build/fasm/x86_64/WINCMD64.EXE', 'build/jwasm/x86_64/WINCMD64.EXE')) {
             Write-Host "[native-win] Running $exe /C VER"
@@ -423,10 +457,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "WINCMD32.EXE --nt31-api-cap failed" }
           & build/nasm/x86_64/WINCMD64.EXE /C build\nasm\dos16\HOSTNAME.COM
           if ($LASTEXITCODE -ne 0) { throw "WINCMD64.EXE vm8086 .COM execution failed" }
-          & build/nasm/x86_64/WINCMD64.EXE /C "BUILD.CMD nasm"
-          if ($LASTEXITCODE -ne 0) { throw "WINCMD64.EXE BUILD.CMD self-hosting failed" }
+          $selfHost64 = Join-Path $env:RUNNER_TEMP 'WINCMD64_SELFHOST.EXE'
+          Copy-Item -Path 'build/nasm/x86_64/WINCMD64.EXE' -Destination $selfHost64 -Force
+          & $selfHost64 /C "make.bat nasm"
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD64.EXE make.bat self-hosting failed" }
 
           & cargo test --workspace
+          if ($LASTEXITCODE -ne 0) { throw "cargo test --workspace failed" }
 
       - name: Lower, Build & Verify (Windows Cygwin)
         if: matrix.profile == 'windows-cygwin'
@@ -435,7 +472,7 @@ jobs:
           set -euo pipefail
           cargo run --release --quiet -p asm-lint -- --dir asm
           cargo run --release --quiet -p asm-conv -- --in-dir asm --out-dir dist/src
-          C:/cygwin/bin/bash.exe --login -o igncr -c '
+          CHERE_INVOKING=1 C:/cygwin/bin/bash.exe --login -o igncr -c '
             set -euo pipefail
             cd "$(cygpath -u "$GITHUB_WORKSPACE")"
             mkdir -p build/nasm/dos16 build/nasm/win16
@@ -456,22 +493,32 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           & cargo run --release --quiet -p asm-conv -- --in-dir asm --out-dir dist/src
+          if ($LASTEXITCODE -ne 0) { throw "asm-conv failed" }
           New-Item -ItemType Directory -Force -Path build/libs, build/llvm/arm32, build/llvm/arm64 | Out-Null
           & llvm-dlltool -m arm -d asm/tc/arm_ms/k32_arm.def -l build/libs/kernel32_arm32.lib
           & llvm-dlltool -m arm64 -d asm/tc/arm_ms/k32_arm.def -l build/libs/kernel32_arm64.lib
           & llvm-mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I dist/src/llvm-mc/arm32/v7 -filetype=obj dist/src/llvm-mc/arm32/v7/wincmdv7.asm -o build/llvm/arm32/wincmdv7.obj
+          if ($LASTEXITCODE -ne 0) { throw "llvm-mc arm32 failed" }
           & lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm32/wincmdv7.obj build/libs/kernel32_arm32.lib /OUT:build/llvm/arm32/WINCMD_ARM32.EXE
+          if ($LASTEXITCODE -ne 0) { throw "lld-link arm32 failed" }
           & llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I dist/src/llvm-mc/arm64 -filetype=obj dist/src/llvm-mc/arm64/wincmda64.asm -o build/llvm/arm64/wincmda64.obj
+          if ($LASTEXITCODE -ne 0) { throw "llvm-mc arm64 failed" }
           & lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm64/wincmda64.obj build/libs/kernel32_arm64.lib /OUT:build/llvm/arm64/WINCMD_ARM64.EXE
+          if ($LASTEXITCODE -ne 0) { throw "lld-link arm64 failed" }
           & cargo run --release --quiet -p asm-lint -- --purity armv7 build/llvm/arm32/WINCMD_ARM32.EXE
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM32.EXE purity failed" }
           & cargo run --release --quiet -p asm-lint -- --purity arm64 build/llvm/arm64/WINCMD_ARM64.EXE
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE purity failed" }
           & cargo run --release --quiet -p emu-cov -- --pe build/llvm/arm32/WINCMD_ARM32.EXE --args "/C VER"
+          if ($LASTEXITCODE -ne 0) { throw "emu-cov WINCMD_ARM32.EXE failed" }
           & build/llvm/arm64/WINCMD_ARM64.EXE /C VER
           if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE /C VER exited with $LASTEXITCODE" }
           & build/llvm/arm64/WINCMD_ARM64.EXE /C tests\SMOKE.BAT
           if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE SMOKE.BAT exited with $LASTEXITCODE" }
-          & build/llvm/arm64/WINCMD_ARM64.EXE /C BUILD.CMD
-          if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE BUILD.CMD self-hosting failed with $LASTEXITCODE" }
+          $selfHostArm64 = Join-Path $env:RUNNER_TEMP 'WINCMD_ARM64_SELFHOST.EXE'
+          Copy-Item -Path 'build/llvm/arm64/WINCMD_ARM64.EXE' -Destination $selfHostArm64 -Force
+          & $selfHostArm64 /C make.bat
+          if ($LASTEXITCODE -ne 0) { throw "WINCMD_ARM64.EXE make.bat self-hosting failed with $LASTEXITCODE" }
 
       - name: Upload Multi-ISA Built Artifacts
         if: matrix.upload_artifacts == true
@@ -515,7 +562,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: wincmd-multi-isa-binaries
-          path: build
+          path: .
 
       - name: Run 8086/286 Emulator Workloads & Emit LCOV (MS-DOS ${{ matrix.era }})
         shell: bash
@@ -608,14 +655,15 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: wincmd-multi-isa-binaries
-          path: build
+          path: .
 
       - name: Measure Rust Workspace Test Coverage & Publish Step Summary
         shell: bash
         run: |
           set -euo pipefail
+          cargo run --release --quiet -p asm-conv -- --in-dir asm --out-dir dist/src
           cargo llvm-cov --workspace --lcov --output-path lcov-rust.info
-          COV_SUMMARY="$(cargo llvm-cov --workspace --summary-only)"
+          COV_SUMMARY="$(cargo llvm-cov report --summary-only)"
           echo "$COV_SUMMARY"
           TEST_PCT="$(echo "$COV_SUMMARY" | awk '/^TOTAL[[:space:]]+/ { print $10 }')"
           ASM_LINT_OUT="$(cargo run --release --quiet -p asm-lint -- --dir asm)"
@@ -720,7 +768,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: wincmd-multi-isa-binaries
-          path: build
+          path: .
 
       - name: Stage Bento DOS Image Builder Repository
         shell: bash

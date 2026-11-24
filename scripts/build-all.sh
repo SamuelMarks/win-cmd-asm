@@ -26,14 +26,22 @@ has_target() {
   esac
 }
 
-if [ -d /opt/homebrew/opt/llvm/bin ]; then
-  LLVM_BIN="/opt/homebrew/opt/llvm/bin"
-else
-  LLVM_BIN="$(dirname "$(command -v llvm-mc 2>/dev/null || printf '/usr/bin/llvm-mc')")"
+EXTRA_LLVM_PATHS=""
+for d in /opt/homebrew/opt/llvm/bin /opt/homebrew/opt/lld/bin /usr/local/opt/llvm/bin /usr/local/opt/lld/bin /usr/lib/llvm*/bin; do
+  if [ -d "$d" ]; then
+    EXTRA_LLVM_PATHS="${EXTRA_LLVM_PATHS:+$EXTRA_LLVM_PATHS:}$d"
+  fi
+done
+if [ -z "$EXTRA_LLVM_PATHS" ]; then
+  EXTRA_LLVM_PATHS="$(dirname "$(command -v llvm-mc 2>/dev/null || printf '/usr/bin/llvm-mc')")"
 fi
 
-TC_BIN="$(TOOLCHAIN="$TOOLCHAIN" ./scripts/bootstrap-toolchains.sh)"
-export PATH="$TC_BIN:$LLVM_BIN:$PATH"
+if [ "$MODE" != "lint" ] && [ "$MODE" != "lower" ]; then
+  TC_BIN="$(TOOLCHAIN="$TOOLCHAIN" ./scripts/bootstrap-toolchains.sh)"
+  export PATH="$TC_BIN:$EXTRA_LLVM_PATHS:$PATH"
+else
+  export PATH="$EXTRA_LLVM_PATHS:$PATH"
+fi
 
 NASM_WARN=(-Ox -w+all -w-reloc -w+error)
 JWASM_WARN=(-q -WX -W4)
@@ -108,8 +116,8 @@ PE_UTILS=(
 )
 
 build_dos16() {
-  mkdir -p "$BUILD_DIR/nasm/dos16" "$BUILD_DIR/fasm/dos16" "$BUILD_DIR/jwasm/dos16"
   if has_tc nasm; then
+    mkdir -p "$BUILD_DIR/nasm/dos16"
     nasm "${NASM_WARN[@]}" -I "$DIST_DIR/nasm/dos16/" -f bin "$DIST_DIR/nasm/dos16/wincmd.asm" -l "$BUILD_DIR/nasm/dos16/WINCMD.LST" -o "$BUILD_DIR/nasm/dos16/WINCMD.COM"
     nasm "${NASM_WARN[@]}" -I "$DIST_DIR/nasm/dos16/" -f bin "$DIST_DIR/nasm/dos16/wincmd1.asm" -o "$BUILD_DIR/nasm/dos16/WINCMD1.COM"
     nasm "${NASM_WARN[@]}" -f bin "$DIST_DIR/nasm/dos16/wincmd_m.asm" -o "$BUILD_DIR/nasm/dos16/WINCMD.MSG"
@@ -125,6 +133,7 @@ build_dos16() {
     done
   fi
   if has_tc fasm; then
+    mkdir -p "$BUILD_DIR/fasm/dos16"
     fasm "$DIST_DIR/fasm/dos16/wincmd.asm" "$BUILD_DIR/fasm/dos16/WINCMD.COM" >/dev/null
     fasm "$DIST_DIR/fasm/dos16/wincmd1.asm" "$BUILD_DIR/fasm/dos16/WINCMD1.COM" >/dev/null
     fasm "$DIST_DIR/fasm/dos16/wincmd_m.asm" "$BUILD_DIR/fasm/dos16/WINCMD.MSG" >/dev/null
@@ -137,6 +146,7 @@ build_dos16() {
     done
   fi
   if has_tc jwasm; then
+    mkdir -p "$BUILD_DIR/jwasm/dos16"
     jwasm "${JWASM_WARN[@]}" -I"$DIST_DIR/jwasm/dos16" -bin -Fl="$BUILD_DIR/jwasm/dos16/WINCMD.LST" -Fo"$BUILD_DIR/jwasm/dos16/WINCMD.COM" "$DIST_DIR/jwasm/dos16/wincmd.asm"
     jwasm "${JWASM_WARN[@]}" -I"$DIST_DIR/jwasm/dos16" -bin -Fo"$BUILD_DIR/jwasm/dos16/WINCMD1.COM" "$DIST_DIR/jwasm/dos16/wincmd1.asm"
     jwasm "${JWASM_WARN[@]}" -bin -Fo"$BUILD_DIR/jwasm/dos16/WINCMD.MSG" "$DIST_DIR/jwasm/dos16/wincmd_m.asm"
@@ -152,7 +162,9 @@ build_dos16() {
 }
 
 build_win16() {
-  mkdir -p "$BUILD_DIR/nasm/win16" "$BUILD_DIR/fasm/win16" "$BUILD_DIR/jwasm/win16"
+  if has_tc nasm; then mkdir -p "$BUILD_DIR/nasm/win16"; fi
+  if has_tc fasm; then mkdir -p "$BUILD_DIR/fasm/win16"; fi
+  if has_tc jwasm; then mkdir -p "$BUILD_DIR/jwasm/win16"; fi
   for pair in w16_pif:WINCMD.PIF w16_main:WINCMD16.EXE w16_286:WINCMD286.EXE; do
     src="${pair%%:*}"
     out="${pair##*:}"
@@ -169,8 +181,8 @@ build_win16() {
 }
 
 build_x86_32() {
-  mkdir -p "$BUILD_DIR/nasm/x86_32" "$BUILD_DIR/fasm/x86_32" "$BUILD_DIR/fasm-pe32/x86_32" "$BUILD_DIR/jwasm/x86_32"
   if has_tc nasm; then
+    mkdir -p "$BUILD_DIR/nasm/x86_32"
     nasm "${NASM_WARN[@]}" -I "$DIST_DIR/nasm/x86_32/" -f win32 "$DIST_DIR/nasm/x86_32/wincmd32.asm" -l "$BUILD_DIR/nasm/x86_32/WINCMD32.LST" -o "$BUILD_DIR/nasm/x86_32/wincmd32.obj"
     lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup "/MAP:$BUILD_DIR/nasm/x86_32/WINCMD32.MAP" "$BUILD_DIR/nasm/x86_32/wincmd32.obj" "$BUILD_DIR/libs/kernel32_x86.lib" "/OUT:$BUILD_DIR/nasm/x86_32/WINCMD32.EXE"
     for pair in "${PE_UTILS[@]}"; do
@@ -181,6 +193,7 @@ build_x86_32() {
     done
   fi
   if has_tc fasm; then
+    mkdir -p "$BUILD_DIR/fasm/x86_32" "$BUILD_DIR/fasm-pe32/x86_32"
     fasm "$DIST_DIR/fasm/x86_32/wincmd32.asm" "$BUILD_DIR/fasm/x86_32/wincmd32.obj" >/dev/null
     lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup "/MAP:$BUILD_DIR/fasm/x86_32/WINCMD32.MAP" "$BUILD_DIR/fasm/x86_32/wincmd32.obj" "$BUILD_DIR/libs/kernel32_x86.lib" "/OUT:$BUILD_DIR/fasm/x86_32/WINCMD32.EXE"
     fasm "$DIST_DIR/fasm-pe32/x86_32/wincmd32.asm" "$BUILD_DIR/fasm-pe32/x86_32/WINCMD32.EXE" >/dev/null
@@ -193,6 +206,7 @@ build_x86_32() {
     done
   fi
   if has_tc jwasm; then
+    mkdir -p "$BUILD_DIR/jwasm/x86_32"
     jwasm "${JWASM_WARN[@]}" -I"$DIST_DIR/jwasm/x86_32" -coff -safeseh -Fl="$BUILD_DIR/jwasm/x86_32/WINCMD32.LST" -Fo"$BUILD_DIR/jwasm/x86_32/wincmd32.obj" "$DIST_DIR/jwasm/x86_32/wincmd32.asm"
     lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup "/MAP:$BUILD_DIR/jwasm/x86_32/WINCMD32.MAP" "$BUILD_DIR/jwasm/x86_32/wincmd32.obj" "$BUILD_DIR/libs/kernel32_x86.lib" "/OUT:$BUILD_DIR/jwasm/x86_32/WINCMD32.EXE"
     for pair in "${PE_UTILS[@]}"; do
@@ -205,8 +219,8 @@ build_x86_32() {
 }
 
 build_x86_64() {
-  mkdir -p "$BUILD_DIR/nasm/x86_64" "$BUILD_DIR/fasm/x86_64" "$BUILD_DIR/fasm-coff/x86_64" "$BUILD_DIR/jwasm/x86_64"
   if has_tc nasm; then
+    mkdir -p "$BUILD_DIR/nasm/x86_64"
     nasm "${NASM_WARN[@]}" -I "$DIST_DIR/nasm/x86_64/" -f win64 "$DIST_DIR/nasm/x86_64/wincmd64.asm" -l "$BUILD_DIR/nasm/x86_64/WINCMD64.LST" -o "$BUILD_DIR/nasm/x86_64/wincmd64.obj"
     lld-link /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,5.02 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /CETCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup "/MAP:$BUILD_DIR/nasm/x86_64/WINCMD64.MAP" "$BUILD_DIR/nasm/x86_64/wincmd64.obj" "$BUILD_DIR/libs/kernel32_x64.lib" "/OUT:$BUILD_DIR/nasm/x86_64/WINCMD64.EXE"
     for pair in "${PE_UTILS[@]}"; do
@@ -217,6 +231,7 @@ build_x86_64() {
     done
   fi
   if has_tc fasm; then
+    mkdir -p "$BUILD_DIR/fasm/x86_64" "$BUILD_DIR/fasm-coff/x86_64"
     fasm "$DIST_DIR/fasm/x86_64/wincmd64.asm" "$BUILD_DIR/fasm/x86_64/WINCMD64.EXE" >/dev/null
     fasm "$DIST_DIR/fasm-coff/x86_64/wincmd64.asm" "$BUILD_DIR/fasm-coff/x86_64/wincmd64.obj" >/dev/null
     lld-link /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,5.02 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /CETCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup "$BUILD_DIR/fasm-coff/x86_64/wincmd64.obj" "$BUILD_DIR/libs/kernel32_x64.lib" "/OUT:$BUILD_DIR/fasm-coff/x86_64/WINCMD64.EXE"
@@ -229,6 +244,7 @@ build_x86_64() {
     done
   fi
   if has_tc jwasm; then
+    mkdir -p "$BUILD_DIR/jwasm/x86_64"
     jwasm "${JWASM_WARN[@]}" -I"$DIST_DIR/jwasm/x86_64" -win64 -Fl="$BUILD_DIR/jwasm/x86_64/WINCMD64.LST" -Fo"$BUILD_DIR/jwasm/x86_64/wincmd64.obj" "$DIST_DIR/jwasm/x86_64/wincmd64.asm"
     lld-link /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,5.02 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /CETCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup "/MAP:$BUILD_DIR/jwasm/x86_64/WINCMD64.MAP" "$BUILD_DIR/jwasm/x86_64/wincmd64.obj" "$BUILD_DIR/libs/kernel32_x64.lib" "/OUT:$BUILD_DIR/jwasm/x86_64/WINCMD64.EXE"
     for pair in "${PE_UTILS[@]}"; do
@@ -241,8 +257,8 @@ build_x86_64() {
 }
 
 build_arm32() {
-  mkdir -p "$BUILD_DIR/fasmarm/arm32" "$BUILD_DIR/llvm/arm32"
   if has_tc fasmarm; then
+    mkdir -p "$BUILD_DIR/fasmarm/arm32"
     fasmarm "$DIST_DIR/fasmarm/arm32/v4/wincmdv4.asm" "$BUILD_DIR/fasmarm/arm32/WINCMD_ARMV4.EXE" >/dev/null
     fasmarm "$DIST_DIR/fasmarm/arm32/v7/wincmdv7.asm" "$BUILD_DIR/fasmarm/arm32/WINCMD_ARM32.EXE" >/dev/null
     for pair in "${PE_UTILS[@]}"; do
@@ -252,6 +268,7 @@ build_arm32() {
     done
   fi
   if has_tc llvm; then
+    mkdir -p "$BUILD_DIR/llvm/arm32"
     llvm-mc -triple=armv4t-none-eabi --fatal-warnings -I "$DIST_DIR/llvm-mc/arm32/v4" -filetype=obj "$DIST_DIR/llvm-mc/arm32/v4/wincmdv4.asm" -o "$BUILD_DIR/llvm/arm32/wincmdv4.obj"
     llvm-mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I "$DIST_DIR/llvm-mc/arm32/v7" -filetype=obj "$DIST_DIR/llvm-mc/arm32/v7/wincmdv7.asm" -o "$BUILD_DIR/llvm/arm32/wincmdv7.obj"
     lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup "/MAP:$BUILD_DIR/llvm/arm32/WINCMD_ARM32.MAP" "$BUILD_DIR/llvm/arm32/wincmdv7.obj" "$BUILD_DIR/libs/kernel32_arm32.lib" "/OUT:$BUILD_DIR/llvm/arm32/WINCMD_ARM32.EXE"
@@ -265,8 +282,8 @@ build_arm32() {
 }
 
 build_arm64() {
-  mkdir -p "$BUILD_DIR/fasmarm/arm64" "$BUILD_DIR/llvm/arm64"
   if has_tc fasmarm; then
+    mkdir -p "$BUILD_DIR/fasmarm/arm64"
     fasmarm "$DIST_DIR/fasmarm/arm64/wincmda64.asm" "$BUILD_DIR/fasmarm/arm64/WINCMD_ARM64.EXE" >/dev/null
     for pair in "${PE_UTILS[@]}"; do
       u_src="${pair%%:*}"
@@ -275,6 +292,7 @@ build_arm64() {
     done
   fi
   if has_tc llvm; then
+    mkdir -p "$BUILD_DIR/llvm/arm64"
     llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I "$DIST_DIR/llvm-mc/arm64" -filetype=obj "$DIST_DIR/llvm-mc/arm64/wincmda64.asm" -o "$BUILD_DIR/llvm/arm64/wincmda64.obj"
     lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup "/MAP:$BUILD_DIR/llvm/arm64/WINCMD_ARM64.MAP" "$BUILD_DIR/llvm/arm64/wincmda64.obj" "$BUILD_DIR/libs/kernel32_arm64.lib" "/OUT:$BUILD_DIR/llvm/arm64/WINCMD_ARM64.EXE"
     for pair in "${PE_UTILS[@]}"; do
@@ -475,21 +493,33 @@ case "$MODE" in
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet
     for era in 1.25 2.00 4.00 7.10; do
       cargo run --release --quiet -p emu-cov -- --com "$BUILD_DIR/nasm/dos16/WINCMD.COM" --era "$era" --args " /C VER"
-      cargo run --release --quiet -p diff-fuzz -- --era "$era" --cases 500 "$BUILD_DIR/nasm/dos16/WINCMD.COM" "$BUILD_DIR/fasm/dos16/WINCMD.COM" "$BUILD_DIR/jwasm/dos16/WINCMD.COM"
+      dos_coms=()
+      for tc in nasm fasm jwasm; do
+        [ -f "$BUILD_DIR/$tc/dos16/WINCMD.COM" ] && dos_coms+=("$BUILD_DIR/$tc/dos16/WINCMD.COM")
+      done
+      if [ "${#dos_coms[@]}" -ge 2 ]; then
+        cargo run --release --quiet -p diff-fuzz -- --era "$era" --cases 500 "${dos_coms[@]}"
+      fi
     done
     mkdir -p "$BUILD_DIR/lcov"
     cargo run --release --quiet -p emu-cov -- --com "$BUILD_DIR/nasm/dos16/WINCMD.COM" --era 7.10 --args " /C VER" --lcov "$BUILD_DIR/lcov/dos16.info"
     cargo run --release --quiet -p emu-cov -- --pe "$BUILD_DIR/nasm/x86_32/WINCMD32.EXE" --args "/C VER" --lcov "$BUILD_DIR/lcov/x86_32.info"
     cargo run --release --quiet -p emu-cov -- --pe "$BUILD_DIR/nasm/x86_64/WINCMD64.EXE" --args "/C VER" --lcov "$BUILD_DIR/lcov/x86_64.info"
-    cargo run --release --quiet -p emu-cov -- --pe "$BUILD_DIR/fasmarm/arm32/WINCMD_ARMV4.EXE" --args "/C VER" --lcov "$BUILD_DIR/lcov/armv4.info"
-    cargo run --release --quiet -p emu-cov -- --pe "$BUILD_DIR/fasmarm/arm32/WINCMD_ARM32.EXE" --args "/C VER" --lcov "$BUILD_DIR/lcov/arm32.info"
-    cargo run --release --quiet -p emu-cov -- --pe "$BUILD_DIR/fasmarm/arm64/WINCMD_ARM64.EXE" --args "/C VER" --lcov "$BUILD_DIR/lcov/arm64.info"
+    if [ -f "$BUILD_DIR/fasmarm/arm32/WINCMD_ARMV4.EXE" ]; then
+      cargo run --release --quiet -p emu-cov -- --pe "$BUILD_DIR/fasmarm/arm32/WINCMD_ARMV4.EXE" --args "/C VER" --lcov "$BUILD_DIR/lcov/armv4.info"
+    fi
+    arm32_pe="$BUILD_DIR/fasmarm/arm32/WINCMD_ARM32.EXE"
+    [ -f "$arm32_pe" ] || arm32_pe="$BUILD_DIR/llvm/arm32/WINCMD_ARM32.EXE"
+    cargo run --release --quiet -p emu-cov -- --pe "$arm32_pe" --args "/C VER" --lcov "$BUILD_DIR/lcov/arm32.info"
+    arm64_pe="$BUILD_DIR/fasmarm/arm64/WINCMD_ARM64.EXE"
+    [ -f "$arm64_pe" ] || arm64_pe="$BUILD_DIR/llvm/arm64/WINCMD_ARM64.EXE"
+    cargo run --release --quiet -p emu-cov -- --pe "$arm64_pe" --args "/C VER" --lcov "$BUILD_DIR/lcov/arm64.info"
     cat "$BUILD_DIR/lcov/"*.info > lcov.info
     cargo run --release --quiet -p diff-fuzz -- --cross-isa --seed 0x20261123 --cases 250 --build-dir "$BUILD_DIR"
     if command -v wine >/dev/null 2>&1; then
-      WINEDEBUG=-all wine "$BUILD_DIR/nasm/x86_32/WINCMD32.EXE" /C VER
-      WINEDEBUG=-all wine "$BUILD_DIR/fasm/x86_64/WINCMD64.EXE" /C VER
-      WINEDEBUG=-all wine "$BUILD_DIR/jwasm/x86_64/WINCMD64.EXE" /C VER
+      [ -f "$BUILD_DIR/nasm/x86_32/WINCMD32.EXE" ] && WINEDEBUG=-all wine "$BUILD_DIR/nasm/x86_32/WINCMD32.EXE" /C VER
+      [ -f "$BUILD_DIR/fasm/x86_64/WINCMD64.EXE" ] && WINEDEBUG=-all wine "$BUILD_DIR/fasm/x86_64/WINCMD64.EXE" /C VER
+      [ -f "$BUILD_DIR/jwasm/x86_64/WINCMD64.EXE" ] && WINEDEBUG=-all wine "$BUILD_DIR/jwasm/x86_64/WINCMD64.EXE" /C VER
     fi
     ;;
   fuzz)

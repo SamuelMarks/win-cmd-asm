@@ -77,7 +77,11 @@ impl SparseGuestMem {
     }
 
     #[inline]
-    fn resolve_read_page(&self, vpn: u64, addr: u64) -> Result<Option<&[u8; PAGE_SIZE]>, ToolError> {
+    fn resolve_read_page(
+        &self,
+        vpn: u64,
+        addr: u64,
+    ) -> Result<Option<&[u8; PAGE_SIZE]>, ToolError> {
         let slot = usize::try_from(vpn & 7).unwrap_or(0);
         let mut cur_tlb = self.tlb.get();
         let (tag, idx) = cur_tlb[slot];
@@ -106,7 +110,11 @@ impl SparseGuestMem {
     }
 
     #[inline]
-    fn resolve_write_page(&mut self, vpn: u64, addr: u64) -> Result<&mut [u8; PAGE_SIZE], ToolError> {
+    fn resolve_write_page(
+        &mut self,
+        vpn: u64,
+        addr: u64,
+    ) -> Result<&mut [u8; PAGE_SIZE], ToolError> {
         let slot = usize::try_from(vpn & 7).unwrap_or(0);
         let mut cur_tlb = self.tlb.get();
         let (tag, idx) = cur_tlb[slot];
@@ -404,10 +412,8 @@ impl Arm32Vm {
         if pe.len() < 0x100 || &pe[0..2] != b"MZ" {
             return Err(emu_err(0, ErrCode::BadExeFormat, "missing MZ signature"));
         }
-        let lfanew = usize::try_from(u32::from_le_bytes([
-            pe[0x3C], pe[0x3D], pe[0x3E], pe[0x3F],
-        ]))
-        .unwrap_or(0);
+        let lfanew = usize::try_from(u32::from_le_bytes([pe[0x3C], pe[0x3D], pe[0x3E], pe[0x3F]]))
+            .unwrap_or(0);
         if pe.get(lfanew..lfanew + 4) != Some(&[b'P', b'E', 0, 0]) {
             return Err(emu_err(0, ErrCode::BadExeFormat, "missing PE signature"));
         }
@@ -449,10 +455,7 @@ impl Arm32Vm {
         num_secs: usize,
     ) -> Result<(), ToolError> {
         mem.map_range(u64::from(image_base), u64::from(size_of_image.max(0x10000)));
-        mem.write_slice(
-            u64::from(image_base),
-            &pe[..size_of_headers.min(pe.len())],
-        )?;
+        mem.write_slice(u64::from(image_base), &pe[..size_of_headers.min(pe.len())])?;
         for i in 0..num_secs {
             let sh = sec_table + i * 40;
             if sh + 40 > pe.len() {
@@ -480,10 +483,7 @@ impl Arm32Vm {
             );
             if raw_sz > 0 && raw_ptr < pe.len() {
                 let end = (raw_ptr + raw_sz).min(pe.len());
-                mem.write_slice(
-                    u64::from(image_base.wrapping_add(rva)),
-                    &pe[raw_ptr..end],
-                )?;
+                mem.write_slice(u64::from(image_base.wrapping_add(rva)), &pe[raw_ptr..end])?;
             }
         }
         Ok(())
@@ -519,7 +519,11 @@ impl Arm32Vm {
                     let thunk_addr = next_thunk;
                     next_thunk += 4;
                     thunks.insert(thunk_addr, fn_name);
-                    let ptr_val = if is_thumb2 { thunk_addr | 1 } else { thunk_addr };
+                    let ptr_val = if is_thumb2 {
+                        thunk_addr | 1
+                    } else {
+                        thunk_addr
+                    };
                     mem.write_u32_le(
                         u64::from(image_base.wrapping_add(ft).wrapping_add(slot * 4)),
                         ptr_val,
@@ -541,7 +545,9 @@ impl Arm32Vm {
         let trimmed = cmdline_tail.trim_start();
         let has_argv0 = !trimmed.is_empty()
             && !trimmed.starts_with('/')
-            && (trimmed.starts_with(DQ) || trimmed.to_ascii_uppercase().starts_with("WINCMD") || trimmed.contains(":\\"));
+            && (trimmed.starts_with(DQ)
+                || trimmed.to_ascii_uppercase().starts_with("WINCMD")
+                || trimmed.contains(":\\"));
         let full_cmd = if is_thumb2 {
             if has_argv0 {
                 cmdline_tail.to_owned()
@@ -736,17 +742,19 @@ impl Arm32Vm {
         let is_t2 = self.is_thumb2;
         let next_t = &mut self.next_thunk;
         let thunk_map = &mut self.thunks;
-        let ret = self.os.dispatch_api(&mut self.mem, &api, &reg_args, sp, &mut |dyn_name| {
-            for (&addr, existing) in thunk_map.iter() {
-                if existing == dyn_name {
-                    return u64::from(if is_t2 { addr | 1 } else { addr });
+        let ret = self
+            .os
+            .dispatch_api(&mut self.mem, &api, &reg_args, sp, &mut |dyn_name| {
+                for (&addr, existing) in thunk_map.iter() {
+                    if existing == dyn_name {
+                        return u64::from(if is_t2 { addr | 1 } else { addr });
+                    }
                 }
-            }
-            let addr = *next_t;
-            *next_t += 4;
-            thunk_map.insert(addr, dyn_name.to_owned());
-            u64::from(if is_t2 { addr | 1 } else { addr })
-        })?;
+                let addr = *next_t;
+                *next_t += 4;
+                thunk_map.insert(addr, dyn_name.to_owned());
+                u64::from(if is_t2 { addr | 1 } else { addr })
+            })?;
         self.regs[0] = u32::try_from(ret & 0xFFFF_FFFF).unwrap_or(0);
         let lr = self.regs[14];
         if is_t2 {
@@ -781,7 +789,11 @@ impl Arm32Vm {
         if self.coverage.disabled {
             return;
         }
-        let entry = self.coverage.branch_edges.entry(pc).or_insert((false, false));
+        let entry = self
+            .coverage
+            .branch_edges
+            .entry(pc)
+            .or_insert((false, false));
         if taken {
             entry.0 = true;
         } else {
@@ -924,7 +936,14 @@ impl Arm32Vm {
         (res, (neg, zero, carry, overflow))
     }
 
-    const fn alu_dp(&mut self, op: u8, rn: u32, op2: u32, shifter_c: bool, set_flags: bool) -> Option<u32> {
+    const fn alu_dp(
+        &mut self,
+        op: u8,
+        rn: u32,
+        op2: u32,
+        shifter_c: bool,
+        set_flags: bool,
+    ) -> Option<u32> {
         let (_, _, c_old, v_old) = self.nzcv;
         match op & 0xF {
             0x0 | 0x1 | 0xC | 0xD | 0xE | 0xF => {
@@ -980,7 +999,11 @@ impl Arm32Vm {
     // Classic 32-bit ARMv4 A32 Decoder & Executor
     // =========================================================================
 
-    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
+    )]
     fn step_a32(&mut self, pc: u32) -> Result<(), ToolError> {
         let insn = self.mem.read_u32_le(u64::from(pc))?;
         self.regs[15] = pc.wrapping_add(4);
@@ -1134,8 +1157,8 @@ impl Arm32Vm {
             let rs = ((insn >> 8) & 0xF) as usize;
             let rm = (insn & 0xF) as usize;
             let mut prod: u64 = if signed {
-                (i64::from(self.read_reg(rm, pc) as i32)
-                    * i64::from(self.read_reg(rs, pc) as i32)) as u64
+                (i64::from(self.read_reg(rm, pc) as i32) * i64::from(self.read_reg(rs, pc) as i32))
+                    as u64
             } else {
                 u64::from(self.read_reg(rm, pc)) * u64::from(self.read_reg(rs, pc))
             };
@@ -1296,7 +1319,11 @@ impl Arm32Vm {
         }
     }
 
-    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
+    )]
     fn exec_thumb16(&mut self, pc: u32, hw: u16, in_it: bool) -> Result<(), ToolError> {
         let set_f = !in_it;
         match hw >> 13 {
@@ -1326,8 +1353,7 @@ impl Arm32Vm {
                     let imm5 = u32::from((hw >> 6) & 0x1F);
                     let rm = usize::from((hw >> 3) & 7);
                     let rd = usize::from(hw & 7);
-                    let (r, c) =
-                        Self::barrel_shift(self.regs[rm], stype, imm5, false, self.nzcv.2);
+                    let (r, c) = Self::barrel_shift(self.regs[rm], stype, imm5, false, self.nzcv.2);
                     self.regs[rd] = r;
                     if set_f {
                         self.nzcv = ((r >> 31) != 0, r == 0, c, self.nzcv.3);
@@ -1502,7 +1528,10 @@ impl Arm32Vm {
                                     return Err(emu_err(
                                         u64::from(pc),
                                         ErrCode::InvalidParameter,
-                                        format!("ARMv7 SP misaligned at BLX: 0x{:08X}", self.regs[13]),
+                                        format!(
+                                            "ARMv7 SP misaligned at BLX: 0x{:08X}",
+                                            self.regs[13]
+                                        ),
                                     ));
                                 }
                                 self.regs[14] = pc.wrapping_add(2) | 1;
@@ -1789,7 +1818,11 @@ impl Arm32Vm {
         }
     }
 
-    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
+    )]
     fn exec_thumb32(&mut self, pc: u32, hw1: u16, hw2: u16) -> Result<(), ToolError> {
         let op1 = (hw1 >> 11) & 3;
         let op2 = (hw1 >> 4) & 0x7F;
@@ -1948,8 +1981,7 @@ impl Arm32Vm {
                     let i2 = (!(j2 ^ s)) & 1;
                     let imm10 = u32::from(hw1 & 0x3FF);
                     let imm11 = u32::from(hw2 & 0x7FF);
-                    let raw25 =
-                        (s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1);
+                    let raw25 = (s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1);
                     let simm = (((raw25 << 7) as i32) >> 7) as u32;
                     if is_bl {
                         if (self.regs[13] & 7) != 0 {
@@ -2084,8 +2116,7 @@ impl Arm32Vm {
                     }
                     return Ok(());
                 }
-                if (hw1 & 0xFF8F) == 0xFA0F && ((hw2 >> 12) & 0xF) == 0xF && ((hw2 >> 7) & 1) == 1
-                {
+                if (hw1 & 0xFF8F) == 0xFA0F && ((hw2 >> 12) & 0xF) == 0xF && ((hw2 >> 7) & 1) == 1 {
                     // SXTH.W / UXTH.W / SXTB.W / UXTB.W
                     let rot = u32::from((hw2 >> 4) & 3) * 8;
                     let v = self.regs[rm].rotate_right(rot);
@@ -2154,11 +2185,7 @@ impl Arm32Vm {
                         (1, 0xF) => {
                             let a = self.regs[rn] as i32;
                             let b = self.regs[rm] as i32;
-                            let q = if b == 0 {
-                                0
-                            } else {
-                                a.wrapping_div(b) as u32
-                            };
+                            let q = if b == 0 { 0 } else { a.wrapping_div(b) as u32 };
                             self.regs[rd_hi] = q;
                             return Ok(());
                         }

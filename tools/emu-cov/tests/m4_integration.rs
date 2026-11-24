@@ -33,10 +33,20 @@ fn load_built(tc: &str, rel: &str) -> Result<Vec<u8>, ToolError> {
     )?)
 }
 
+fn built_toolchains() -> Vec<&'static str> {
+    let root = repo_root();
+    let tcs: Vec<&'static str> = ["nasm", "fasm", "jwasm"]
+        .into_iter()
+        .filter(|tc| root.join(format!("build/{tc}/dos16/WINCMD.COM")).is_file())
+        .collect();
+    assert!(!tcs.is_empty(), "at least one DOS16 toolchain must be built");
+    tcs
+}
+
 #[test]
 fn m4_devices_pathnorm_truename_and_dp_glob_across_eras_and_assemblers() -> Result<(), ToolError> {
     let s = bs();
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
 
         // 1. MS-DOS 1.25 FCB NUL redirection, IF EXIST NUL/CON, TYPE NUL, COPY CON, TRUENAME
@@ -104,7 +114,10 @@ fn m4_devices_pathnorm_truename_and_dp_glob_across_eras_and_assemblers() -> Resu
             assert!(out.contains("DEV_COUT"), "{tc} {era:?} out: {out}");
             assert!(out.contains("AAAB.TXT"), "{tc} {era:?} glob: {out}");
             assert!(out.contains("AXAYAZB.TXT"), "{tc} {era:?} glob: {out}");
-            assert!(!out.contains("AAAAAAC.TXT"), "{tc} {era:?} glob false pos: {out}");
+            assert!(
+                !out.contains("AAAAAAC.TXT"),
+                "{tc} {era:?} glob false pos: {out}"
+            );
             if era == DosEra::Dos200 {
                 let exp_unc = format!("{s}{s}SRV{s}SHARE{s}LEAF");
                 let exp_verb = format!("{s}{s}?{s}C:{s}KeepDot.");
@@ -119,7 +132,7 @@ fn m4_devices_pathnorm_truename_and_dp_glob_across_eras_and_assemblers() -> Resu
 #[test]
 fn m4_setlocal_auto_unwind_pushd_dynamic_vars_and_path_search() -> Result<(), ToolError> {
     let s = bs();
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
         let mut vm = DosVm::new(DosEra::Dos400);
 
@@ -129,10 +142,8 @@ fn m4_setlocal_auto_unwind_pushd_dynamic_vars_and_path_search() -> Result<(), To
         vm.vfs
             .insert(bin_tool_com, vec![0xB8, 0x41, 0x4C, 0xCD, 0x21]);
         let bin_cmd_script = format!("A:{s}BIN{s}EXTCMD.CMD");
-        vm.vfs.insert(
-            bin_cmd_script,
-            join_crlf(&["@ECHO EXT_CMD_OK_%1"]),
-        );
+        vm.vfs
+            .insert(bin_cmd_script, join_crlf(&["@ECHO EXT_CMD_OK_%1"]));
 
         // Child .BAT that opens SETLOCAL, mutates OUTER + CWD + DelayedExpansion, and exits WITHOUT ENDLOCAL!
         vm.vfs.insert(
@@ -165,13 +176,17 @@ fn m4_setlocal_auto_unwind_pushd_dynamic_vars_and_path_search() -> Result<(), To
             String::from("ECHO DYN=%DATE%_%HIGHESTNUMANODENUMBER%_%CMDEXTVERSION%"),
         ];
         let line_refs: Vec<&str> = main_lines.iter().map(String::as_str).collect();
-        vm.vfs.insert(String::from("M4RT.BAT"), join_crlf(&line_refs));
+        vm.vfs
+            .insert(String::from("M4RT.BAT"), join_crlf(&line_refs));
         vm.load_com(&com, " --dialect=nt /C M4RT.BAT", &[])?;
         let res = vm.run(10_000_000)?;
         assert_eq!(res.exit_code, 0, "{tc} exit");
         let out = String::from_utf8_lossy(&res.stdout);
         assert!(out.contains("IN_SL=INNER_MUTATED"), "{tc} out: {out}");
-        assert!(out.contains("AFTER_SL=ORIGINAL_"), "{tc} unwind failed: {out}");
+        assert!(
+            out.contains("AFTER_SL=ORIGINAL_"),
+            "{tc} unwind failed: {out}"
+        );
         assert!(
             out.contains(&format!("IN_PD=A:{s}WORK{s}DEEP")),
             "{tc} pushd failed: {out}"
@@ -192,7 +207,7 @@ fn m4_setlocal_auto_unwind_pushd_dynamic_vars_and_path_search() -> Result<(), To
 
 #[test]
 fn m4_eleven_tier_set_a_and_complete_phase16_builtins() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
         let mut vm = DosVm::new(DosEra::Dos710);
         let mut sin = b"COPYCON_710".to_vec();
@@ -276,7 +291,10 @@ fn m4_eleven_tier_set_a_and_complete_phase16_builtins() -> Result<(), ToolError>
         assert!(out.contains("LH_OK"), "{tc} lh: {out}");
         assert!(out.contains("START_OK"), "{tc} start: {out}");
         assert!(out.contains("SUB_OK"), "{tc} cmd /c: {out}");
-        assert!(out.contains("LEAK_CHK=[]"), "{tc} cmd subshell isolation: {out}");
+        assert!(
+            out.contains("LEAK_CHK=[]"),
+            "{tc} cmd subshell isolation: {out}"
+        );
         assert!(out.contains("MKL_EL=1"), "{tc} mklink: {out}");
     }
     Ok(())

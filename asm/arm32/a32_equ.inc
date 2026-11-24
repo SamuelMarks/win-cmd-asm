@@ -274,7 +274,8 @@
     @field dwSetlocalBase, dword, 1
     @field bIsCallSub, byte, 1
     @field bBomKind, byte, 1
-    @field wPad, word, 1
+    @field bJumped, byte, 1
+    @field bPad, byte, 1
     @field dwSavedCodePage, dword, 1
     @field dwReserved, dword, 6
 @endstruc

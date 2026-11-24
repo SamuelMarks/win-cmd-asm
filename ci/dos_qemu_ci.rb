@@ -72,8 +72,11 @@ module WinCmdDosQemuCI
       qcow = Dir.glob(File.join(builds_dir, "**", "*freedos*.qcow2")).first
       unless qcow
         builder = File.join(bento_dir, "freedos-builder.sh")
-        builder = File.join(bento_dir, "msdos-builder.sh") unless File.exist?(builder)
-        ok = system("sh", builder, "freedos", chdir: bento_dir)
+        ok = if File.exist?(builder)
+               system("sh", builder, "build", chdir: bento_dir)
+             else
+               system({ "MSDOS_VERSION" => "4.0" }, "sh", File.join(bento_dir, "msdos-builder.sh"), "build", chdir: bento_dir)
+             end
         raise "Failed building FreeDOS Bento image via #{builder}" unless ok
         qcow = Dir.glob(File.join(builds_dir, "**", "*freedos*.qcow2")).first
       end
@@ -86,7 +89,7 @@ module WinCmdDosQemuCI
              Dir.glob(File.join(builds_dir, "**", "*msdos*#{tag}*.qcow2")).first
       unless qcow
         builder = File.join(bento_dir, "msdos-builder.sh")
-        ok = system("sh", builder, ver, chdir: bento_dir)
+        ok = system({ "MSDOS_VERSION" => ver }, "sh", builder, "build", chdir: bento_dir)
         raise "Failed building MS-DOS #{ver} Bento image via #{builder}" unless ok
         qcow = Dir.glob(File.join(builds_dir, "**", "*msdos*#{ver}*.qcow2")).first ||
                Dir.glob(File.join(builds_dir, "**", "*msdos*#{tag}*.qcow2")).first
@@ -144,6 +147,8 @@ module WinCmdDosQemuCI
   end
 
   def verify_target!(os_target:, bento_dir:, build_dir:, toolchain: "nasm")
+    bento_dir = File.expand_path(bento_dir)
+    build_dir = File.expand_path(build_dir)
     load_bento_plugins!(bento_dir)
 
     dos_dir = File.join(build_dir, toolchain, "dos16")
@@ -156,11 +161,13 @@ module WinCmdDosQemuCI
     whoami_com = File.join(dos_dir, "WHOAMI.COM")
     wincmdmz_exe = File.join(dos_dir, "WINCMDMZ.EXE")
     wincmdmz_exe = File.join(build_dir, "fasm", "dos16", "WINCMDMZ.EXE") unless File.file?(wincmdmz_exe)
+    wincmdmz_exe = File.join(build_dir, "jwasm", "dos16", "WINCMDMZ.EXE") unless File.file?(wincmdmz_exe)
     [wincmd, wincmd1, winmsg, asmconv, mem_com, hostname_com, whoami_com].each do |bin|
       raise "Missing built DOS16 artifact: #{bin}" unless File.file?(bin)
     end
 
     base_qcow2, flavor, ver = ensure_bento_image!(bento_dir, os_target)
+    base_qcow2 = File.expand_path(base_qcow2)
     work_dir = ENV["DOS_WORK_DIR"] || File.join(Dir.pwd, "build", "qemu-work")
     FileUtils.mkdir_p(work_dir)
 

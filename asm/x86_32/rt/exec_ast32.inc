@@ -411,6 +411,8 @@
 .item_lp:
     cmp byte [g_exit_flag], 0
     jne .done
+    cmp byte [g_batch_ret_flag], 0
+    jne .done
     cmp byte [g_goto_pending], 0
     jne .done
     cmp dword [g_ctrl_break], 0
@@ -540,6 +542,8 @@
 
 .wild_next:
     cmp byte [g_exit_flag], 0
+    jne .wild_close
+    cmp byte [g_batch_ret_flag], 0
     jne .wild_close
     cmp byte [g_goto_pending], 0
     jne .wild_close
@@ -697,6 +701,10 @@
 
 .sub_nx:
     cmp byte [g_exit_flag], 0
+    jne .sub_close
+    cmp byte [g_batch_ret_flag], 0
+    jne .sub_close
+    cmp byte [g_goto_pending], 0
     jne .sub_close
     push ebx
     push edi
@@ -1348,6 +1356,8 @@
 .line_lp:
     cmp byte [g_exit_flag], 0
     jne .done
+    cmp byte [g_batch_ret_flag], 0
+    jne .done
     cmp byte [g_goto_pending], 0
     jne .done
     xor esi, esi ; len
@@ -1421,6 +1431,8 @@
     jz .done_cur
     cmp byte [g_exit_flag], 0
     jne .done_cur
+    cmp byte [g_batch_ret_flag], 0
+    jne .done_cur
     cmp byte [g_goto_pending], 0
     jne .done_cur
     cmp dword [g_ctrl_break], 0
@@ -1454,6 +1466,8 @@
     mov esi, dword [ebp + AST_NODE32.pChild1]
     call exec_ast_node32
     cmp byte [g_exit_flag], 0
+    jne .done_cur
+    cmp byte [g_batch_ret_flag], 0
     jne .done_cur
     cmp byte [g_goto_pending], 0
     jne .done_cur
@@ -1618,6 +1632,8 @@
 
 .for_l_lp:
     cmp byte [g_exit_flag], 0
+    jne .for_l_end
+    cmp byte [g_batch_ret_flag], 0
     jne .for_l_end
     cmp byte [g_goto_pending], 0
     jne .for_l_end
@@ -1905,6 +1921,7 @@
 
 .on_exit_b:
     mov byte [g_batch_ret_flag], 0
+    mov byte [g_goto_pending], 0
 
 .cleanup_frame:
     mov eax, ebp

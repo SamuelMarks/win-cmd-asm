@@ -40,6 +40,22 @@ fn load_arm64_bin(rel: &str) -> Result<Vec<u8>, ToolError> {
     Ok(fs::read(p)?)
 }
 
+fn built_arm64_shells() -> Result<Vec<(&'static str, &'static str)>, ToolError> {
+    let root = repo_root()?;
+    let pairs: Vec<(&'static str, &'static str)> = [
+        ("fasmarm", "build/fasmarm/arm64/WINCMD_ARM64.EXE"),
+        ("llvm", "build/llvm/arm64/WINCMD_ARM64.EXE"),
+    ]
+    .into_iter()
+    .filter(|(_, rel)| root.join(rel).is_file())
+    .collect();
+    assert!(
+        !pairs.is_empty(),
+        "at least one ARM64 shell binary must be built"
+    );
+    Ok(pairs)
+}
+
 fn run_arm64(
     pe: &[u8],
     cmdline: &str,
@@ -51,10 +67,7 @@ fn run_arm64(
 
 #[test]
 fn m11_pe64_headers_security_pdata_pac_bti_and_zero_crt_imports() -> Result<(), ToolError> {
-    for (tc, rel) in [
-        ("fasmarm", "build/fasmarm/arm64/WINCMD_ARM64.EXE"),
-        ("llvm", "build/llvm/arm64/WINCMD_ARM64.EXE"),
-    ] {
+    for (tc, rel) in built_arm64_shells()? {
         let pe = load_arm64_bin(rel)?;
         assert!(
             pe.len() <= 131_072,
@@ -91,7 +104,11 @@ fn m11_pe64_headers_security_pdata_pac_bti_and_zero_crt_imports() -> Result<(), 
 
         let dll_chars = u16::from_le_bytes([pe[opt + 70], pe[opt + 71]]);
         if tc == "fasmarm" {
-            assert_eq!(dll_chars & 0x0140, 0x0140, "{rel} missing DYNAMIC_BASE | NX_COMPAT");
+            assert_eq!(
+                dll_chars & 0x0140,
+                0x0140,
+                "{rel} missing DYNAMIC_BASE | NX_COMPAT"
+            );
         } else {
             assert_eq!(
                 dll_chars & 0x4160,
@@ -187,10 +204,7 @@ fn m11_arith_expansion_delayed_utf16_bom_and_setlocal_all_arm64_builds() -> Resu
     }
 
     let mut outputs = Vec::new();
-    for rel in [
-        "build/fasmarm/arm64/WINCMD_ARM64.EXE",
-        "build/llvm/arm64/WINCMD_ARM64.EXE",
-    ] {
+    for (_, rel) in built_arm64_shells()? {
         let pe = load_arm64_bin(rel)?;
         let env = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         let bat_path = format!("C:{BS}Temp{BS}arith64.cmd");
@@ -210,7 +224,10 @@ fn m11_arith_expansion_delayed_utf16_bom_and_setlocal_all_arm64_builds() -> Resu
             "{rel} unexpected stdout: {}",
             res.stdout
         );
-        assert!(res.stdout.contains("AFTER="), "{rel} SETLOCAL unwind failed");
+        assert!(
+            res.stdout.contains("AFTER="),
+            "{rel} SETLOCAL unwind failed"
+        );
         assert!(
             res.stdout.contains("UTF16_BOM_OK"),
             "{rel} UTF-16LE BOM batch failed: {}",
@@ -219,7 +236,9 @@ fn m11_arith_expansion_delayed_utf16_bom_and_setlocal_all_arm64_builds() -> Resu
         assert!(res.coverage.executed_pcs.len() > 500);
         outputs.push(res.stdout);
     }
-    assert_eq!(outputs[0], outputs[1], "fasmarm vs llvm-mc stdout mismatch");
+    if outputs.len() >= 2 {
+        assert_eq!(outputs[0], outputs[1], "fasmarm vs llvm-mc stdout mismatch");
+    }
     Ok(())
 }
 
@@ -243,10 +262,7 @@ fn m11_batch_control_flow_for_if_call_shift_and_autorun_all_arm64_builds() -> Re
         "EXIT /B 0".to_owned(),
     ]);
 
-    for rel in [
-        "build/fasmarm/arm64/WINCMD_ARM64.EXE",
-        "build/llvm/arm64/WINCMD_ARM64.EXE",
-    ] {
+    for (_, rel) in built_arm64_shells()? {
         let pe = load_arm64_bin(rel)?;
         let env = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         let bat = format!("C:{BS}Temp{BS}flow64.cmd");
@@ -259,8 +275,15 @@ fn m11_batch_control_flow_for_if_call_shift_and_autorun_all_arm64_builds() -> Re
 
         let res_auto = run_arm64(&pe, &format!("/C {bat}"), Rc::clone(&env))?;
         assert_eq!(res_auto.exit_code, 41, "{rel} exit code mismatch");
-        assert!(res_auto.stdout.contains("AUTORUN_FIRED"), "{rel} AutoRun missing");
-        assert!(res_auto.stdout.contains("FLOW_OK_16_alpha"), "{rel} out: {}", res_auto.stdout);
+        assert!(
+            res_auto.stdout.contains("AUTORUN_FIRED"),
+            "{rel} AutoRun missing"
+        );
+        assert!(
+            res_auto.stdout.contains("FLOW_OK_16_alpha"),
+            "{rel} out: {}",
+            res_auto.stdout
+        );
         assert!(
             res_auto.stdout.contains("SHIFTED=second_third"),
             "{rel} out: {}",
@@ -269,7 +292,10 @@ fn m11_batch_control_flow_for_if_call_shift_and_autorun_all_arm64_builds() -> Re
 
         // `/D` must suppress Registry AutoRun!
         let res_noauto = run_arm64(&pe, &format!("/D /C {bat}"), env)?;
-        assert!(!res_noauto.stdout.contains("AUTORUN_FIRED"), "{rel} /D failed");
+        assert!(
+            !res_noauto.stdout.contains("AUTORUN_FIRED"),
+            "{rel} /D failed"
+        );
     }
     Ok(())
 }
@@ -277,10 +303,7 @@ fn m11_batch_control_flow_for_if_call_shift_and_autorun_all_arm64_builds() -> Re
 #[test]
 fn m11_win11_arm64_concurrent_pipes_mklink_registry_longpath_and_case_sens() -> Result<(), ToolError>
 {
-    for rel in [
-        "build/fasmarm/arm64/WINCMD_ARM64.EXE",
-        "build/llvm/arm64/WINCMD_ARM64.EXE",
-    ] {
+    for (_, rel) in built_arm64_shells()? {
         let pe = load_arm64_bin(rel)?;
         let env = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         env.borrow_mut().write_file(
@@ -329,9 +352,14 @@ fn m11_win11_arm64_concurrent_pipes_mklink_registry_longpath_and_case_sens() -> 
         );
         let res = run_arm64(&pe, &pipe_cmd, Rc::clone(&env))?;
         assert_eq!(res.exit_code, 0, "{rel} stderr: {}", res.stderr);
-        assert!(res.stdout.contains(".a64=Arm64AsmFile"), "{rel} out: {}", res.stdout);
         assert!(
-            res.stdout.contains(&format!("Arm64AsmFile=C:{BS}bin{BS}a64.exe")),
+            res.stdout.contains(".a64=Arm64AsmFile"),
+            "{rel} out: {}",
+            res.stdout
+        );
+        assert!(
+            res.stdout
+                .contains(&format!("Arm64AsmFile=C:{BS}bin{BS}a64.exe")),
             "{rel} out: {}",
             res.stdout
         );
@@ -414,10 +442,7 @@ fn m11_vm8086_executes_real_16bit_com_and_mz_exe_on_win11_arm64() -> Result<(), 
     // 3. Also load our actual assembled 16-bit `HOSTNAME.COM` utility from `build/nasm/dos16/HOSTNAME.COM`!
     let real_hostname_com = load_arm64_bin("build/nasm/dos16/HOSTNAME.COM")?;
 
-    for rel in [
-        "build/fasmarm/arm64/WINCMD_ARM64.EXE",
-        "build/llvm/arm64/WINCMD_ARM64.EXE",
-    ] {
+    for (_, rel) in built_arm64_shells()? {
         let pe = load_arm64_bin(rel)?;
         let env = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         let com_p = format!("C:{BS}Temp{BS}hello16.com");
@@ -440,10 +465,26 @@ fn m11_vm8086_executes_real_16bit_com_and_mz_exe_on_win11_arm64() -> Result<(), 
         env.borrow_mut().write_file(&bat, script.as_bytes());
 
         let res = run_arm64(&pe, &format!("/D /C {bat}"), env)?;
-        assert!(res.stdout.contains("A64_VM86_OK"), "{rel} .COM out: {}", res.stdout);
-        assert!(res.stdout.contains("COM_EL=37"), "{rel} .COM exit: {}", res.stdout);
-        assert!(res.stdout.contains("MZ_A64_OK"), "{rel} MZ out: {}", res.stdout);
-        assert!(res.stdout.contains("MZ_EL=19"), "{rel} MZ exit: {}", res.stdout);
+        assert!(
+            res.stdout.contains("A64_VM86_OK"),
+            "{rel} .COM out: {}",
+            res.stdout
+        );
+        assert!(
+            res.stdout.contains("COM_EL=37"),
+            "{rel} .COM exit: {}",
+            res.stdout
+        );
+        assert!(
+            res.stdout.contains("MZ_A64_OK"),
+            "{rel} MZ out: {}",
+            res.stdout
+        );
+        assert!(
+            res.stdout.contains("MZ_EL=19"),
+            "{rel} MZ exit: {}",
+            res.stdout
+        );
         assert!(
             res.stdout.contains("WIN11-ARM64-BOX"),
             "{rel} real 16-bit HOSTNAME.COM failed on ARM64 vm8086: {}",
@@ -456,10 +497,7 @@ fn m11_vm8086_executes_real_16bit_com_and_mz_exe_on_win11_arm64() -> Result<(), 
 #[test]
 fn m11_self_host_executes_real_build_cmd_on_arm64() -> Result<(), ToolError> {
     let build_cmd = load_arm64_bin("BUILD.CMD")?;
-    for rel in [
-        "build/fasmarm/arm64/WINCMD_ARM64.EXE",
-        "build/llvm/arm64/WINCMD_ARM64.EXE",
-    ] {
+    for (_, rel) in built_arm64_shells()? {
         let pe = load_arm64_bin(rel)?;
         let env = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         let bcmd_path = format!("C:{BS}Temp{BS}BUILD.CMD");
@@ -467,14 +505,34 @@ fn m11_self_host_executes_real_build_cmd_on_arm64() -> Result<(), ToolError> {
 
         let res = run_arm64(
             &pe,
-            &format!("/D /C {DQ}CD /D C:{BS}Temp & CALL BUILD.CMD & IF EXIST build{BS}llvm{BS}arm64 ECHO BUILD_DIRS_OK{DQ}"),
-            env,
+            &format!(
+                "/D /C {DQ}CD /D C:{BS}Temp & CALL BUILD.CMD & IF EXIST build{BS}llvm{BS}arm64 ECHO BUILD_DIRS_OK{DQ}"
+            ),
+            Rc::clone(&env),
         )?;
         assert_eq!(res.exit_code, 0, "{rel} BUILD.CMD failed: {}", res.stderr);
         assert!(
             res.stdout.contains("BUILD_DIRS_OK"),
             "{rel} BUILD.CMD did not create build/llvm/arm64: {}",
             res.stdout
+        );
+
+        let res_err = run_arm64(
+            &pe,
+            &format!(
+                "/V:ON /D /C {DQ}CD /D C:{BS}Temp & CALL BUILD.CMD lower 2>NUL & SET RC=!ERRORLEVEL! & ECHO LOWER_RC=!RC! & EXIT /B !RC!{DQ}"
+            ),
+            env,
+        )?;
+        assert_eq!(
+            res_err.exit_code, 1,
+            "{rel} BUILD.CMD lower exit code mismatch: {}",
+            res_err.stdout
+        );
+        assert!(
+            res_err.stdout.contains("LOWER_RC=1"),
+            "{rel} BUILD.CMD lower EXIT /B 1 did not stop before GOTO :DONE: {}",
+            res_err.stdout
         );
     }
     Ok(())

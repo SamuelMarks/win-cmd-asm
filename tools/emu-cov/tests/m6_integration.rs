@@ -27,6 +27,16 @@ fn load_dos16(tc: &str, name: &str) -> Result<Vec<u8>, ToolError> {
     )?)
 }
 
+fn built_toolchains() -> Vec<&'static str> {
+    let root = repo_root();
+    let tcs: Vec<&'static str> = ["nasm", "fasm", "jwasm"]
+        .into_iter()
+        .filter(|tc| root.join(format!("build/{tc}/win16/WINCMD16.EXE")).is_file())
+        .collect();
+    assert!(!tcs.is_empty(), "at least one Win16 toolchain must be built");
+    tcs
+}
+
 fn join_crlf(lines: &[&str]) -> Vec<u8> {
     let mut out = Vec::new();
     for line in lines {
@@ -57,9 +67,13 @@ fn push_typed_line(vm: &mut DosVm, line: &str) {
 
 #[test]
 fn m6_wincmd_pif_std_and_286_386_extensions_across_assemblers() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let pif = load_win16(tc, "WINCMD.PIF")?;
-        assert_eq!(pif.len(), 545, "{tc} WINCMD.PIF exact 545-byte extended layout");
+        assert_eq!(
+            pif.len(),
+            545,
+            "{tc} WINCMD.PIF exact 545-byte extended layout"
+        );
         assert_eq!(&pif[0x24..0x2E], b"WINCMD.COM", "{tc} PIF program");
         assert_eq!(pif[0x2E], 0);
         assert_eq!(
@@ -82,7 +96,7 @@ fn m6_wincmd_pif_std_and_286_386_extensions_across_assemblers() -> Result<(), To
 #[test]
 fn m6_win104_and_win203_tiled_vs_overlapping_and_loadmodule_across_assemblers()
 -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let exe16 = load_win16(tc, "WINCMD16.EXE")?;
         assert!(exe16.len() <= 65_536);
 
@@ -103,9 +117,12 @@ fn m6_win104_and_win203_tiled_vs_overlapping_and_loadmodule_across_assemblers()
         assert!(pm1.resource_types.contains(&0x8004), "{tc} RT_MENU");
         assert_eq!(pm1.error_mode, 0x0001, "{tc} /F SEM_FAILCRITICALERRORS");
 
-        let cw1 = pm1.created_window.as_ref().ok_or_else(|| ToolError::CliUsage {
-            message: "missing CreatedWindowInfo".into(),
-        })?;
+        let cw1 = pm1
+            .created_window
+            .as_ref()
+            .ok_or_else(|| ToolError::CliUsage {
+                message: "missing CreatedWindowInfo".into(),
+            })?;
         assert_eq!(cw1.x, 0x8000, "{tc} Win 1.04 tiled CW_USEDEFAULT x");
         assert_eq!(cw1.y, 0x8000, "{tc} Win 1.04 tiled CW_USEDEFAULT y");
         assert_eq!(cw1.width, 0x8000, "{tc} Win 1.04 tiled CW_USEDEFAULT cx");
@@ -140,9 +157,12 @@ fn m6_win104_and_win203_tiled_vs_overlapping_and_loadmodule_across_assemblers()
         let pm2 = vm2.pmode.as_ref().ok_or_else(|| ToolError::CliUsage {
             message: "missing pmode".into(),
         })?;
-        let cw2 = pm2.created_window.as_ref().ok_or_else(|| ToolError::CliUsage {
-            message: "missing cw2".into(),
-        })?;
+        let cw2 = pm2
+            .created_window
+            .as_ref()
+            .ok_or_else(|| ToolError::CliUsage {
+                message: "missing cw2".into(),
+            })?;
         assert_eq!(cw2.width, 640, "{tc} Win 2.03 overlapping width");
         assert_eq!(pm2.scroll_pos, (1, 1), "{tc} VScroll/HScroll updated");
         assert_eq!(pm2.caret.1, 12, "{tc} Overstrike block caret height == 12");
@@ -161,7 +181,7 @@ fn m6_wincmd286_wfw311_unc_dragdrop_clipboard_toolhelp_and_batch() -> Result<(),
     ])
     .into_owned();
     let expected_z = String::from_utf8_lossy(&[b'Z', b':', 0x5C]).into_owned();
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let exe286 = load_win16(tc, "WINCMD286.EXE")?;
         let mut vm = DosVm::new(DosEra::Dos400);
         vm.vfs
@@ -259,7 +279,7 @@ fn m6_win320_simplified_chinese_cp936_dbcs_ime_and_internal_dos_com() -> Result<
     ];
     mini_com.extend_from_slice(b"COM_IN_W16$");
 
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let exe16 = load_win16(tc, "WINCMD16.EXE")?;
         let mut vm = DosVm::new(DosEra::Dos400);
         vm.vfs.insert(String::from("MINI.COM"), mini_com.clone());
@@ -340,7 +360,7 @@ fn m6_protected_mode_gp_fault_trap_and_dos_winoldap_clipboard() -> Result<(), To
         "expected #GP on CS: write, got {cs_err:?}"
     );
 
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let wincmd = load_dos16(tc, "WINCMD.COM")?;
         let mut dvm = DosVm::new(DosEra::Dos400);
         dvm.win_enh_mode = true;

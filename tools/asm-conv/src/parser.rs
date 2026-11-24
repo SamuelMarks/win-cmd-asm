@@ -86,7 +86,8 @@ pub fn parse_canonical(file_path: &str, source: &str) -> Result<CanonicalModule,
         if let Some(rest) = clean.strip_prefix('@') {
             idx = parse_top_directive(file_path, &lines, idx, rest, span, &mut st)?;
         } else {
-            st.items.push(TopItem::Stmt(parse_body_line(&clean, span, false)?));
+            st.items
+                .push(TopItem::Stmt(parse_body_line(&clean, span, false)?));
             idx += 1;
         }
     }
@@ -131,23 +132,15 @@ fn parse_top_directive(
             Ok(idx + 1)
         }
         "entry" => {
-            if arg_str.is_empty() {
-                return Err(ToolError::Syntax {
-                    span,
-                    message: "@entry requires a symbol name".into(),
-                });
-            }
-            st.entry = Some(arg_str.to_owned());
+            st.entry = Some(require_symbol_arg(arg_str, "@entry requires a symbol name", span)?);
             Ok(idx + 1)
         }
         "safeseh" => {
-            if arg_str.is_empty() {
-                return Err(ToolError::Syntax {
-                    span,
-                    message: "@safeseh requires a handler symbol name".into(),
-                });
-            }
-            st.safeseh = Some(arg_str.to_owned());
+            st.safeseh = Some(require_symbol_arg(
+                arg_str,
+                "@safeseh requires a handler symbol name",
+                span,
+            )?);
             Ok(idx + 1)
         }
         "include" => {
@@ -167,16 +160,8 @@ fn parse_top_directive(
             Ok(idx + 1)
         }
         "global" => {
-            if arg_str.is_empty() {
-                return Err(ToolError::Syntax {
-                    span,
-                    message: "@global requires a symbol name".into(),
-                });
-            }
-            st.items.push(TopItem::Global {
-                symbol: arg_str.to_owned(),
-                span,
-            });
+            let symbol = require_symbol_arg(arg_str, "@global requires a symbol name", span.clone())?;
+            st.items.push(TopItem::Global { symbol, span });
             Ok(idx + 1)
         }
         "extern" => {
@@ -210,10 +195,21 @@ fn parse_top_directive(
             Ok(next_idx)
         }
         _ => {
-            st.items.push(TopItem::Stmt(parse_directive_stmt(dir, arg_str, span)?));
+            st.items
+                .push(TopItem::Stmt(parse_directive_stmt(dir, arg_str, span)?));
             Ok(idx + 1)
         }
     }
+}
+
+fn require_symbol_arg(arg_str: &str, msg: &str, span: SourceSpan) -> Result<String, ToolError> {
+    if arg_str.is_empty() {
+        return Err(ToolError::Syntax {
+            span,
+            message: msg.into(),
+        });
+    }
+    Ok(arg_str.to_owned())
 }
 
 fn parse_const_directive(
@@ -310,8 +306,9 @@ fn parse_struc_block(
         let Some(field_rest) = clean.strip_prefix("@field") else {
             return Err(ToolError::Syntax {
                 span,
-                message: "expected `@field <name>, <byte|word|dword|qword>, <count>` or `@endstruc`"
-                    .into(),
+                message:
+                    "expected `@field <name>, <byte|word|dword|qword>, <count>` or `@endstruc`"
+                        .into(),
             });
         };
         let fargs = split_operands(field_rest.trim());

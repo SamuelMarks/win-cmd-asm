@@ -180,7 +180,8 @@ impl Arm64Vm {
             ));
         }
         let sec_table = opt + opt_size;
-        let entry_rva = u32::from_le_bytes([pe[opt + 16], pe[opt + 17], pe[opt + 18], pe[opt + 19]]);
+        let entry_rva =
+            u32::from_le_bytes([pe[opt + 16], pe[opt + 17], pe[opt + 18], pe[opt + 19]]);
         let mut ib_bytes = [0u8; 8];
         ib_bytes.copy_from_slice(&pe[opt + 24..opt + 32]);
         let image_base = u64::from_le_bytes(ib_bytes);
@@ -277,12 +278,15 @@ impl Arm64Vm {
                         break;
                     }
                     let name_rva = ent & 0x7FFF_FFFF_FFFF_FFFF;
-                    let fn_name = mem.read_cstr(image_base.wrapping_add(name_rva).wrapping_add(2))?;
+                    let fn_name =
+                        mem.read_cstr(image_base.wrapping_add(name_rva).wrapping_add(2))?;
                     let thunk_addr = next_thunk;
                     next_thunk += 8;
                     thunks.insert(thunk_addr, fn_name);
                     mem.write_u64_le(
-                        image_base.wrapping_add(u64::from(ft)).wrapping_add(slot * 8),
+                        image_base
+                            .wrapping_add(u64::from(ft))
+                            .wrapping_add(slot * 8),
                         thunk_addr,
                     )?;
                 }

@@ -147,11 +147,7 @@ impl CoverageData {
     /// # Errors
     ///
     /// Returns [`ToolError::Coverage`] if branch-edge coverage falls below `required_bps`.
-    pub fn verify_branch_coverage(
-        &self,
-        scope: &str,
-        required_bps: u32,
-    ) -> Result<(), ToolError> {
+    pub fn verify_branch_coverage(&self, scope: &str, required_bps: u32) -> Result<(), ToolError> {
         let total = self.total_branch_edges();
         if total == 0 {
             return Ok(());
@@ -460,7 +456,12 @@ impl DosVm {
     /// # Errors
     ///
     /// Returns [`ToolError::SizeBudget`] if `image.len() > 65_280`.
-    pub fn load_com(&mut self, image: &[u8], cmdline_tail: &str, env_vars: &[(&str, &str)]) -> Result<(), ToolError> {
+    pub fn load_com(
+        &mut self,
+        image: &[u8],
+        cmdline_tail: &str,
+        env_vars: &[(&str, &str)],
+    ) -> Result<(), ToolError> {
         if image.len() > 65_280 {
             return Err(ToolError::SizeBudget {
                 artifact: "COM image".into(),
@@ -1163,11 +1164,7 @@ impl DosVm {
             // Shifts & Rotates: D0/D1 (by 1), D2/D3 (by CL)
             0xD0..=0xD3 => {
                 let (ea, subop) = self.decode_modrm(seg_override);
-                let count = if opcode >= 0xD2 {
-                    self.get_reg8(1)
-                } else {
-                    1
-                };
+                let count = if opcode >= 0xD2 { self.get_reg8(1) } else { 1 };
                 if (opcode & 1) == 0 {
                     let v = self.read_rm8(ea);
                     let r = self.shift8(subop, v, count);
@@ -1276,11 +1273,19 @@ impl DosVm {
         if taken {
             if (self.br_taken_bits[w] & mask) == 0 {
                 self.br_taken_bits[w] |= mask;
-                self.coverage.branch_edges.entry(lin_pc).or_insert((false, false)).0 = true;
+                self.coverage
+                    .branch_edges
+                    .entry(lin_pc)
+                    .or_insert((false, false))
+                    .0 = true;
             }
         } else if (self.br_not_taken_bits[w] & mask) == 0 {
             self.br_not_taken_bits[w] |= mask;
-            self.coverage.branch_edges.entry(lin_pc).or_insert((false, false)).1 = true;
+            self.coverage
+                .branch_edges
+                .entry(lin_pc)
+                .or_insert((false, false))
+                .1 = true;
         }
     }
 
@@ -1716,7 +1721,8 @@ impl DosVm {
                         cs,
                         ip,
                         code: ErrCode::DivByZero,
-                        message: "16-bit DIV quotient overflow or division by zero (INT 00h)".into(),
+                        message: "16-bit DIV quotient overflow or division by zero (INT 00h)"
+                            .into(),
                     });
                 }
                 let qb = (num / u32::from(v)).to_le_bytes();
@@ -1732,7 +1738,8 @@ impl DosVm {
                         cs,
                         ip,
                         code: ErrCode::DivByZero,
-                        message: "16-bit IDIV quotient overflow or division by zero (INT 00h)".into(),
+                        message: "16-bit IDIV quotient overflow or division by zero (INT 00h)"
+                            .into(),
                     });
                 }
                 let qb = (num / den).to_le_bytes();
@@ -1842,11 +1849,7 @@ impl DosVm {
     fn exec_string_op(&mut self, opcode: u8, rep_mode: u8, seg_override: Option<usize>) {
         let is_word = (opcode & 1) != 0;
         let step: u16 = if (self.flags & flags::DF) != 0 {
-            if is_word {
-                0xFFFE
-            } else {
-                0xFFFF
-            }
+            if is_word { 0xFFFE } else { 0xFFFF }
         } else if is_word {
             2
         } else {
@@ -2228,7 +2231,11 @@ impl DosVm {
                             }
                             let key = self.norm_vfs_key(&path);
                             if ah == 0x3C {
-                                if self.vfs_meta.get(&key).is_some_and(|m| (m.attr & 0x01) != 0) {
+                                if self
+                                    .vfs_meta
+                                    .get(&key)
+                                    .is_some_and(|m| (m.attr & 0x01) != 0)
+                                {
                                     self.last_dos_err = ErrCode::AccessDenied.code();
                                     self.regs[0] = self.last_dos_err;
                                     self.set_cf(true);
@@ -2301,7 +2308,11 @@ impl DosVm {
                                 of2.pos += avail;
                             }
                             for (i, &b) in slice.iter().enumerate() {
-                                self.write_u8(ds, dx.wrapping_add(u16::try_from(i).unwrap_or(0)), b);
+                                self.write_u8(
+                                    ds,
+                                    dx.wrapping_add(u16::try_from(i).unwrap_or(0)),
+                                    b,
+                                );
                             }
                             self.regs[0] = u16::try_from(avail).unwrap_or(0);
                             self.set_cf(false);
@@ -2365,7 +2376,11 @@ impl DosVm {
                     0x41 => {
                         let raw = self.read_asciiz(self.sregs[Self::DS], self.regs[2]);
                         let key = self.norm_vfs_key(&raw);
-                        if self.vfs_meta.get(&key).is_some_and(|m| (m.attr & 0x01) != 0) {
+                        if self
+                            .vfs_meta
+                            .get(&key)
+                            .is_some_and(|m| (m.attr & 0x01) != 0)
+                        {
                             self.last_dos_err = ErrCode::AccessDenied.code();
                             self.regs[0] = self.last_dos_err;
                             self.set_cf(true);
@@ -2381,8 +2396,8 @@ impl DosVm {
                     0x42 => {
                         let bx = self.regs[3];
                         let origin = self.get_reg8(0);
-                        let off_i32 =
-                            ((u32::from(self.regs[1]) << 16) | u32::from(self.regs[2])).cast_signed();
+                        let off_i32 = ((u32::from(self.regs[1]) << 16) | u32::from(self.regs[2]))
+                            .cast_signed();
                         if let Some(of) = self.handles.get(&bx) {
                             let file_len = self.vfs.get(&of.path).map_or(0, Vec::len);
                             let base = match origin {
@@ -2485,11 +2500,7 @@ impl DosVm {
                         let si = self.regs[6];
                         let cwd_bytes = self.cwd.as_bytes().to_vec();
                         for (i, &b) in cwd_bytes.iter().enumerate() {
-                            self.write_u8(
-                                ds,
-                                si.wrapping_add(u16::try_from(i).unwrap_or(0)),
-                                b,
-                            );
+                            self.write_u8(ds, si.wrapping_add(u16::try_from(i).unwrap_or(0)), b);
                         }
                         self.write_u8(
                             ds,
@@ -2514,10 +2525,10 @@ impl DosVm {
                         self.set_reg8(0, u8::from((self.dos_ctrl_flags & 0x02) != 0));
                     }
                     0x56 => {
-                        let old_k =
-                            self.norm_vfs_key(&self.read_asciiz(self.sregs[Self::DS], self.regs[2]));
-                        let new_k =
-                            self.norm_vfs_key(&self.read_asciiz(self.sregs[Self::ES], self.regs[7]));
+                        let old_k = self
+                            .norm_vfs_key(&self.read_asciiz(self.sregs[Self::DS], self.regs[2]));
+                        let new_k = self
+                            .norm_vfs_key(&self.read_asciiz(self.sregs[Self::ES], self.regs[7]));
                         if let Some(bytes) = self.vfs.remove(&old_k) {
                             self.vfs.insert(new_k.clone(), bytes);
                             if let Some(meta) = self.vfs_meta.remove(&old_k) {
@@ -2658,7 +2669,10 @@ impl DosVm {
                                 self.regs[0] = self.last_dos_err;
                                 self.set_cf(true);
                             } else if exists
-                                && self.vfs_meta.get(&key).is_some_and(|m| (m.attr & 0x01) != 0)
+                                && self
+                                    .vfs_meta
+                                    .get(&key)
+                                    .is_some_and(|m| (m.attr & 0x01) != 0)
                                 && (action & 0x02) != 0
                             {
                                 self.last_dos_err = ErrCode::AccessDenied.code();
@@ -2767,7 +2781,8 @@ impl DosVm {
                         let len = usize::from(self.regs[1]);
                         let mut data = Vec::with_capacity(len);
                         for i in 0..len {
-                            let b = self.read_u8(es, bx.wrapping_add(u16::try_from(i).unwrap_or(0)));
+                            let b =
+                                self.read_u8(es, bx.wrapping_add(u16::try_from(i).unwrap_or(0)));
                             if b == 0 {
                                 break;
                             }
@@ -2844,12 +2859,7 @@ impl DosVm {
                     if new_paras + 1 < cur_paras {
                         self.mem[mcb_lin] = b'M';
                         let free_mcb_seg = block_seg.wrapping_add(new_paras);
-                        self.write_mcb(
-                            free_mcb_seg,
-                            b'Z',
-                            0,
-                            cur_paras - new_paras - 1,
-                        );
+                        self.write_mcb(free_mcb_seg, b'Z', 0, cur_paras - new_paras - 1);
                     }
                     self.set_cf(false);
                 } else {
@@ -2933,10 +2943,14 @@ fn run_pe_cli<W: Write>(
 ) -> Result<VmRunResult, ToolError> {
     let pe = fs::read(path)?;
     if pe.len() < 0x80 || &pe[0..2] != b"MZ" {
-        return Err(win_mock::emu_err(0, ErrCode::BadExeFormat, "invalid PE file"));
+        return Err(win_mock::emu_err(
+            0,
+            ErrCode::BadExeFormat,
+            "invalid PE file",
+        ));
     }
-    let lfa = usize::try_from(u32::from_le_bytes([pe[0x3C], pe[0x3D], pe[0x3E], pe[0x3F]]))
-        .unwrap_or(0);
+    let lfa =
+        usize::try_from(u32::from_le_bytes([pe[0x3C], pe[0x3D], pe[0x3E], pe[0x3F]])).unwrap_or(0);
     let machine = u16::from_le_bytes([
         *pe.get(lfa + 4).unwrap_or(&0),
         *pe.get(lfa + 5).unwrap_or(&0),
@@ -3046,7 +3060,11 @@ where
 
     let bytes = fs::read(&path)?;
     let mut vm = DosVm::new(era);
-    vm.load_com(&bytes, &cmd_tail, &[("COMSPEC", r"A:\WINCMD.COM"), ("PATH", "A:")])?;
+    vm.load_com(
+        &bytes,
+        &cmd_tail,
+        &[("COMSPEC", r"A:\WINCMD.COM"), ("PATH", "A:")],
+    )?;
     let res = vm.run(2_000_000)?;
 
     if let Some(lcov_file) = lcov_out {
@@ -3142,7 +3160,8 @@ mod tests {
         assert!(lcov.contains("BRDA:"));
         vm.coverage.verify_pc_coverage("empty", &[], 10_000)?;
         let first_pc = u32::try_from(DosVm::lin(DosVm::DEFAULT_PSP_SEG, 0x0100)).unwrap_or(0);
-        vm.coverage.verify_pc_coverage("matrix", &[first_pc], 10_000)?;
+        vm.coverage
+            .verify_pc_coverage("matrix", &[first_pc], 10_000)?;
         assert!(
             vm.coverage
                 .verify_pc_coverage("matrix", &[first_pc, 0x99999], 10_000)
@@ -3175,8 +3194,8 @@ mod tests {
             0xBA, 0x48, 0x01, 0xB9, 0x02, 0x00, 0xB4, 0x40, 0xCD, 0x21, // write "OK"
             0xB4, 0x3E, 0xCD, 0x21, // close
             0xBA, 0x40, 0x01, 0xB8, 0x00, 0x3D, 0xCD, 0x21, // open "T.TXT"
-            0x89, 0xC3,
-            0xBA, 0x50, 0x01, 0xB9, 0x02, 0x00, 0xB4, 0x3F, 0xCD, 0x21, // read 2 bytes
+            0x89, 0xC3, 0xBA, 0x50, 0x01, 0xB9, 0x02, 0x00, 0xB4, 0x3F, 0xCD,
+            0x21, // read 2 bytes
             0xBB, 0x01, 0x00, 0xB4, 0x40, 0xCD, 0x21, // write to stdout
             0xB8, 0x00, 0x4C, 0xCD, 0x21,
         ];

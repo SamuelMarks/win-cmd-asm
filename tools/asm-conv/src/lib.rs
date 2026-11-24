@@ -357,9 +357,11 @@ where
             "--in-file" => in_file = Some(PathBuf::from(val)),
             "--out-file" => out_file = Some(PathBuf::from(val)),
             "--target" => {
-                target = Some(TargetAssembler::parse(val).ok_or_else(|| ToolError::CliUsage {
-                    message: format!("unknown target assembler `{val}`"),
-                })?);
+                target = Some(
+                    TargetAssembler::parse(val).ok_or_else(|| ToolError::CliUsage {
+                        message: format!("unknown target assembler `{val}`"),
+                    })?,
+                );
             }
             _ => {
                 return Err(ToolError::CliUsage {
@@ -385,13 +387,19 @@ where
             fs::create_dir_all(parent)?;
         }
         fs::write(&outf, lowered)?;
-        writeln!(out, "asm-conv: lowered {} -> {} ({tgt})", inf.display(), outf.display())?;
+        writeln!(
+            out,
+            "asm-conv: lowered {} -> {} ({tgt})",
+            inf.display(),
+            outf.display()
+        )?;
         return Ok(());
     }
 
     Err(ToolError::CliUsage {
-        message: "expected `--in-dir <d> --out-dir <d>` or `--in-file <f> --out-file <f> --target <t>`"
-            .into(),
+        message:
+            "expected `--in-dir <d> --out-dir <d>` or `--in-file <f> --out-file <f> --target <t>`"
+                .into(),
     })
 }
 
@@ -716,37 +724,55 @@ ret",
             "bad label:",
         ];
         for src in bad_cases {
-            assert!(parser::parse_canonical("bad.asm", src).is_err(), "expected err for: {src}");
+            assert!(
+                parser::parse_canonical("bad.asm", src).is_err(),
+                "expected err for: {src}"
+            );
         }
     }
 
     #[test]
     fn lowerer_rejects_incompatible_targets_and_helpers_preserve_quotes() -> Result<(), ToolError> {
-        let doc_only = parser::parse_canonical("doc.inc", ";; @file doc.inc
-")?;
+        let doc_only = parser::parse_canonical(
+            "doc.inc",
+            ";; @file doc.inc
+",
+        )?;
         assert_eq!(doc_only.file_doc.get("file"), Some("doc.inc"));
 
-        let no_cpu_com = parser::parse_canonical("x.asm", "@format com
+        let no_cpu_com = parser::parse_canonical(
+            "x.asm",
+            "@format com
 s:
-ret")?;
+ret",
+        )?;
         assert!(lower::lower_module(&no_cpu_com, TargetAssembler::Nasm).is_err());
 
-        let x86_mod = parser::parse_canonical("x.asm", "@cpu 8086
+        let x86_mod = parser::parse_canonical(
+            "x.asm",
+            "@cpu 8086
 @format com
 s:
-ret")?;
+ret",
+        )?;
         assert!(lower::lower_module(&x86_mod, TargetAssembler::LlvmMc).is_err());
 
-        let arm_com = parser::parse_canonical("x.asm", "@cpu arm64
+        let arm_com = parser::parse_canonical(
+            "x.asm",
+            "@cpu arm64
 @format com
 s:
-ret")?;
+ret",
+        )?;
         assert!(lower::lower_module(&arm_com, TargetAssembler::LlvmMc).is_err());
 
-        let bad_sec = parser::parse_canonical("x.asm", "@cpu 8086
+        let bad_sec = parser::parse_canonical(
+            "x.asm",
+            "@cpu 8086
 @format com
 @section resident
-")?;
+",
+        )?;
         assert!(lower::lower_module(&bad_sec, TargetAssembler::Nasm).is_err());
 
         let frame_on_8086 = parser::parse_canonical(

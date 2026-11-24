@@ -14,10 +14,10 @@ all:
 	@TOOLCHAIN="$(TOOLCHAIN)" TARGET="$(TARGET)" BUILD_DIR="$(BUILD_DIR)" DIST_DIR="$(DIST_DIR)" bash ./scripts/build-all.sh all
 
 lint:
-	@bash ./scripts/build-all.sh lint
+	@TOOLCHAIN="$(TOOLCHAIN)" bash ./scripts/build-all.sh lint
 
 lower:
-	@DIST_DIR="$(DIST_DIR)" bash ./scripts/build-all.sh lower
+	@TOOLCHAIN="$(TOOLCHAIN)" DIST_DIR="$(DIST_DIR)" bash ./scripts/build-all.sh lower
 
 build: lower
 	@TOOLCHAIN="$(TOOLCHAIN)" TARGET="$(TARGET)" BUILD_DIR="$(BUILD_DIR)" DIST_DIR="$(DIST_DIR)" bash ./scripts/build-all.sh build
@@ -34,7 +34,7 @@ test:
 fuzz:
 	@TOOLCHAIN="$(TOOLCHAIN)" TARGET="$(TARGET)" BUILD_DIR="$(BUILD_DIR)" DIST_DIR="$(DIST_DIR)" bash ./scripts/build-all.sh fuzz
 
-coverage:
+coverage: all
 	@cargo llvm-cov --workspace --summary-only
 
 ci-list:

@@ -9,9 +9,9 @@ name: CI
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "main" ]
   pull_request:
-    branches:
+    branches: [ "master", "main" ]
   workflow_dispatch:
     inputs:
       msdos_qemu_testing:
@@ -45,7 +45,7 @@ jobs:
     with:
       run_fuzz: true
       fuzz_cases: ${{ inputs.fuzz_cases || 1000 }}
-      run_coverage: ${{ inputs.run_coverage != false }}
-      run_docker: ${{ inputs.run_docker != false }}
+      run_coverage: ${{ github.event_name != 'workflow_dispatch' || inputs.run_coverage }}
+      run_docker: ${{ github.event_name != 'workflow_dispatch' || inputs.run_docker }}
       msdos_qemu_testing: ${{ inputs.msdos_qemu_testing == true }}
       msdos_versions: ${{ inputs.msdos_versions || '4.0,2.0,1.25,freedos' }}

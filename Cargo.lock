@@ -4,14 +4,14 @@ version = 4
 
 [[package]]
 name = "asm-conv"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "wincmd-diag",
 ]
 
 [[package]]
 name = "asm-lint"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "asm-conv",
  "wincmd-diag",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "diff-fuzz"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "emu-cov",
  "wincmd-diag",
@@ -59,14 +59,14 @@ dependencies = [
 
 [[package]]
 name = "emu-cov"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "wincmd-diag",
 ]
 
 [[package]]
 name = "media-pkg"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "wincmd-diag",
 ]
@@ -135,7 +135,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "wincmd-diag"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "derive_more",
 ]

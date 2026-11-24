@@ -109,12 +109,16 @@ run_stage_docker() {
   local dockerfile="$2"
   local tag="$3"
   echo "=== [ci-local] docker-$name ==="
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "Skipping docker-$name: docker not found in PATH."
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    echo "Skipping docker-$name: docker daemon not available."
     return 0
   fi
-  docker build -f "$dockerfile" -t "$tag" .
-  docker run --rm -v "$REPO_ROOT:/workspace" -w /workspace -e TOOLCHAIN=all -e WINCMD_TC_DIR=/tmp/wincmd-tc "$tag" bash -lc 'make lint && make lower && make build TOOLCHAIN=all && make verify TOOLCHAIN=all && cargo test --workspace'
+  local plat_args=()
+  case "$(uname -m)" in
+    arm64|aarch64) plat_args=(--platform linux/amd64) ;;
+  esac
+  docker build "${plat_args[@]}" -f "$dockerfile" -t "$tag" .
+  docker run "${plat_args[@]}" --rm -v "$REPO_ROOT:/workspace:ro" -e TOOLCHAIN=all -e WINCMD_TC_DIR=/tmp/wincmd-tc "$tag" bash -lc 'mkdir -p /tmp/ws && cp -a /workspace/. /tmp/ws && cd /tmp/ws && rm -rf target build dist && make lint && make lower && make build TOOLCHAIN=all && make verify TOOLCHAIN=all && cargo test --workspace'
 }
 
 run_stage_coverage() {

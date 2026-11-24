@@ -297,7 +297,9 @@ impl ErrCode {
             Self::AccessDenied => "Access is denied.",
             Self::InvalidHandle => "The handle is invalid.",
             Self::McbDestroyed => "Memory control blocks destroyed.",
-            Self::OutOfMemory => "Not enough memory resources are available to process this command.",
+            Self::OutOfMemory => {
+                "Not enough memory resources are available to process this command."
+            }
             Self::InvalidMcb => "The storage control block address is invalid.",
             Self::InvalidEnvironment => "The environment is incorrect.",
             Self::BadExeFormat => "The specified program is not a valid executable.",
@@ -313,8 +315,12 @@ impl ErrCode {
             Self::WriteFault => "The system cannot write to the specified device.",
             Self::ReadFault => "The system cannot read from the specified device.",
             Self::GeneralFailure => "A device attached to the system is not functioning.",
-            Self::SharingViolation => "The process cannot access the file because it is being used by another process.",
-            Self::LockViolation => "The process cannot access the file because another process has locked a portion of the file.",
+            Self::SharingViolation => {
+                "The process cannot access the file because it is being used by another process."
+            }
+            Self::LockViolation => {
+                "The process cannot access the file because another process has locked a portion of the file."
+            }
             Self::FileExists => "The file exists.",
             Self::CannotMake => "The directory or file cannot be created.",
             Self::FailInt24 => "Fail on INT 24.",
@@ -326,7 +332,9 @@ impl ErrCode {
             Self::BadCommand => "Bad command or file name.",
             Self::LabelNotFound => "The system cannot find the batch label specified.",
             Self::DivByZero => "Divide by zero error.",
-            Self::InvalidNumber => "Invalid number. Numeric constants are either decimal (17), hexadecimal (0x11), or octal (021).",
+            Self::InvalidNumber => {
+                "Invalid number. Numeric constants are either decimal (17), hexadecimal (0x11), or octal (021)."
+            }
             Self::UnbalancedParens => "Unbalanced parenthesis.",
             Self::MissingOperand => "Missing operand.",
             Self::MissingOperator => "Missing operator.",
@@ -340,7 +348,13 @@ impl ErrCode {
 
 impl fmt::Display for ErrCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({}): {}", self.asm_ident(), self.code(), self.message())
+        write!(
+            f,
+            "{} ({}): {}",
+            self.asm_ident(),
+            self.code(),
+            self.message()
+        )
     }
 }
 
@@ -382,7 +396,10 @@ impl CpuIsa {
     /// Returns `true` if this ISA belongs to the x86 family (`8086`, `286`, `IA-32`, `x86-64`).
     #[must_use]
     pub const fn is_x86(self) -> bool {
-        matches!(self, Self::X86_8086 | Self::X86_286 | Self::Ia32 | Self::X86_64)
+        matches!(
+            self,
+            Self::X86_8086 | Self::X86_286 | Self::Ia32 | Self::X86_64
+        )
     }
 
     /// Returns the canonical name string for diagnostics and `@isa` tags.
@@ -605,7 +622,9 @@ pub enum ToolError {
     },
 
     /// Multi-assembler output equivalence mismatch (`NASM` vs `FASM` vs `JWasm`).
-    #[display("assembler equivalence mismatch on `{artifact}` at byte offset 0x{offset:X}: {details}")]
+    #[display(
+        "assembler equivalence mismatch on `{artifact}` at byte offset 0x{offset:X}: {details}"
+    )]
     #[from(ignore)]
     Equivalence {
         /// Artifact under comparison.
@@ -631,7 +650,9 @@ pub enum ToolError {
     },
 
     /// Instruction or conditional-branch coverage fell below the required threshold (`emu-cov`).
-    #[display("coverage gate failed for `{scope}`: {covered}/{total} ({percent_bps} bps < {required_bps} bps)")]
+    #[display(
+        "coverage gate failed for `{scope}`: {covered}/{total} ({percent_bps} bps < {required_bps} bps)"
+    )]
     #[from(ignore)]
     Coverage {
         /// Module or suite name.
@@ -691,12 +712,30 @@ mod tests {
     #[test]
     fn dos125_and_os_error_mappings() {
         assert_eq!(ErrCode::from_dos125_fcb(0x00, false), None);
-        assert_eq!(ErrCode::from_dos125_fcb(0x01, true), Some(ErrCode::DiskFull));
-        assert_eq!(ErrCode::from_dos125_fcb(0x01, false), Some(ErrCode::NoMoreFiles));
-        assert_eq!(ErrCode::from_dos125_fcb(0x03, false), Some(ErrCode::NoMoreFiles));
-        assert_eq!(ErrCode::from_dos125_fcb(0x02, false), Some(ErrCode::InvalidData));
-        assert_eq!(ErrCode::from_dos125_fcb(0xFF, true), Some(ErrCode::CannotMake));
-        assert_eq!(ErrCode::from_dos125_fcb(0xFF, false), Some(ErrCode::FileNotFound));
+        assert_eq!(
+            ErrCode::from_dos125_fcb(0x01, true),
+            Some(ErrCode::DiskFull)
+        );
+        assert_eq!(
+            ErrCode::from_dos125_fcb(0x01, false),
+            Some(ErrCode::NoMoreFiles)
+        );
+        assert_eq!(
+            ErrCode::from_dos125_fcb(0x03, false),
+            Some(ErrCode::NoMoreFiles)
+        );
+        assert_eq!(
+            ErrCode::from_dos125_fcb(0x02, false),
+            Some(ErrCode::InvalidData)
+        );
+        assert_eq!(
+            ErrCode::from_dos125_fcb(0xFF, true),
+            Some(ErrCode::CannotMake)
+        );
+        assert_eq!(
+            ErrCode::from_dos125_fcb(0xFF, false),
+            Some(ErrCode::FileNotFound)
+        );
 
         assert_eq!(ErrCode::from_os_error(2), ErrCode::FileNotFound);
         assert_eq!(ErrCode::from_os_error(499), ErrCode::GeneralFailure);
@@ -723,12 +762,37 @@ mod tests {
         assert_eq!(CpuIsa::parse("mips"), None);
 
         let assemblers = [
-            ("nasm", TargetAssembler::Nasm, CpuIsa::X86_8086, CpuIsa::Arm64),
+            (
+                "nasm",
+                TargetAssembler::Nasm,
+                CpuIsa::X86_8086,
+                CpuIsa::Arm64,
+            ),
             ("fasm", TargetAssembler::Fasm, CpuIsa::Ia32, CpuIsa::ArmV7),
-            ("jwasm", TargetAssembler::Jwasm, CpuIsa::X86_64, CpuIsa::ArmV4),
-            ("fasmarm", TargetAssembler::FasmArm, CpuIsa::ArmV4, CpuIsa::X86_8086),
-            ("llvm-mc", TargetAssembler::LlvmMc, CpuIsa::ArmV7, CpuIsa::X86_286),
-            ("armasm64", TargetAssembler::ArmAsm, CpuIsa::Arm64, CpuIsa::Ia32),
+            (
+                "jwasm",
+                TargetAssembler::Jwasm,
+                CpuIsa::X86_64,
+                CpuIsa::ArmV4,
+            ),
+            (
+                "fasmarm",
+                TargetAssembler::FasmArm,
+                CpuIsa::ArmV4,
+                CpuIsa::X86_8086,
+            ),
+            (
+                "llvm-mc",
+                TargetAssembler::LlvmMc,
+                CpuIsa::ArmV7,
+                CpuIsa::X86_286,
+            ),
+            (
+                "armasm64",
+                TargetAssembler::ArmAsm,
+                CpuIsa::Arm64,
+                CpuIsa::Ia32,
+            ),
         ];
         for (name, asm, ok_isa, bad_isa) in assemblers {
             assert_eq!(TargetAssembler::parse(name), Some(asm));

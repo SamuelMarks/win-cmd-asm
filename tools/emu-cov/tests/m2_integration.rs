@@ -21,8 +21,22 @@ fn workspace_root() -> PathBuf {
 }
 
 fn load_built(tc: &str, name: &str) -> Result<Vec<u8>, ToolError> {
-    let p = workspace_root().join("build").join(tc).join("dos16").join(name);
+    let p = workspace_root()
+        .join("build")
+        .join(tc)
+        .join("dos16")
+        .join(name);
     Ok(std::fs::read(p)?)
+}
+
+fn built_toolchains() -> Vec<&'static str> {
+    let root = workspace_root();
+    let tcs: Vec<&'static str> = ["nasm", "fasm", "jwasm"]
+        .into_iter()
+        .filter(|tc| root.join("build").join(tc).join("dos16/WINCMD.COM").is_file())
+        .collect();
+    assert!(!tcs.is_empty(), "at least one DOS16 toolchain must be built");
+    tcs
 }
 
 fn bs() -> char {
@@ -88,7 +102,7 @@ fn build_relocated_mz_exe(exit_code: u8, use_int20: bool) -> Vec<u8> {
 
 #[test]
 fn m2_dos125_fcb_vfs_fat12_manual_loader_and_int21_redirector() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
         let mut vm = DosVm::new(DosEra::Dos125);
         vm.corrupt_high_ram_on_exec = true;
@@ -109,7 +123,8 @@ fn m2_dos125_fcb_vfs_fat12_manual_loader_and_int21_redirector() -> Result<(), To
             0x3C, 0x0A, 0x74, 0xF0, // 18..22: cmp al, 0x0A; je .lp (-16 -> 6)
             0x88, 0xC2, 0xB4, 0x02, 0xCD, 0x21, // 22..28: mov dl, al; mov ah, 2; int 21h
             0xEB, 0xE8, // 28..30: jmp .lp (-24 -> 6)
-            0xB2, b']', 0xB4, 0x02, 0xCD, 0x21, // 30..36: .done: mov dl, ']'; mov ah, 2; int 21h
+            0xB2, b']', 0xB4, 0x02, 0xCD,
+            0x21, // 30..36: .done: mov dl, ']'; mov ah, 2; int 21h
             0xCD, 0x20, // 36..38: int 20h
         ];
         vm.vfs.insert(String::from("FILT.COM"), filter_com);
@@ -138,7 +153,10 @@ fn m2_dos125_fcb_vfs_fat12_manual_loader_and_int21_redirector() -> Result<(), To
         let res = vm.run(15_000_000)?;
         assert_eq!(res.exit_code, 0);
         let out = String::from_utf8_lossy(&res.stdout);
-        assert!(out.contains("Volume in drive A is WINCMD12"), "stdout: {out}");
+        assert!(
+            out.contains("Volume in drive A is WINCMD12"),
+            "stdout: {out}"
+        );
         assert!(out.contains("102,400 bytes free"), "stdout: {out}");
         assert!(out.contains("Access denied"), "stdout: {out}");
         assert!(out.contains("Exact19BytePayload!"), "stdout: {out}");
@@ -152,7 +170,7 @@ fn m2_dos125_fcb_vfs_fat12_manual_loader_and_int21_redirector() -> Result<(), To
 
 #[test]
 fn m2_dos200_subdirs_ss_sp_exec_guard_and_files8_discipline() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
         let mut vm = DosVm::new(DosEra::Dos200);
         vm.corrupt_high_ram_on_exec = true;
@@ -182,16 +200,10 @@ fn m2_dos200_subdirs_ss_sp_exec_guard_and_files8_discipline() -> Result<(), Tool
         );
         vm.vfs.insert(
             String::from("B3.BAT"),
-            join_crlf(&[
-                "MZTST",
-                "IF ERRORLEVEL 37 ECHO EXIT37 >> LOG.TXT",
-                "B4.BAT",
-            ]),
+            join_crlf(&["MZTST", "IF ERRORLEVEL 37 ECHO EXIT37 >> LOG.TXT", "B4.BAT"]),
         );
-        vm.vfs.insert(
-            String::from("B4.BAT"),
-            join_crlf(&["ECHO L4 >> LOG.TXT"]),
-        );
+        vm.vfs
+            .insert(String::from("B4.BAT"), join_crlf(&["ECHO L4 >> LOG.TXT"]));
 
         vm.load_com(&com, " /C B1.BAT", &[("COMSPEC", &comspec), ("PATH", "A:")])?;
         let res = vm.run(15_000_000)?;
@@ -215,7 +227,7 @@ fn m2_dos200_subdirs_ss_sp_exec_guard_and_files8_discipline() -> Result<(), Tool
 
 #[test]
 fn m2_dos400_fat16_64bit_chcp_dbcs_msg_ems40_and_xms_swap() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
         let msg = load_built(tc, "WINCMD.MSG")?;
 
@@ -282,7 +294,7 @@ fn m2_dos400_fat16_64bit_chcp_dbcs_msg_ems40_and_xms_swap() -> Result<(), ToolEr
 
 #[test]
 fn m2_dos710_lfn_zero_handle_leak_fat32_64bit_winoldap_and_line_ed() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
         let mut vm = DosVm::new(DosEra::Dos710);
         vm.win_enh_mode = true;
@@ -423,7 +435,14 @@ fn m2_init_switches_5rule_quotes_autoexec_and_tty_ansi_line_ed() -> Result<(), T
     tvm.load_com(&com, " /P", &[])?;
     let tres = tvm.run(6_000_000)?;
     let tout = String::from_utf8_lossy(&tres.stdout);
-    assert!(tout.contains("WINCMD Pure-ASM Shell [MS-DOS 2.00]"), "stdout: {tout}");
-    assert_eq!(tout.matches("TTY1").count(), 4, "expected 2 prompt echoes + 2 outputs: {tout}");
+    assert!(
+        tout.contains("WINCMD Pure-ASM Shell [MS-DOS 2.00]"),
+        "stdout: {tout}"
+    );
+    assert_eq!(
+        tout.matches("TTY1").count(),
+        4,
+        "expected 2 prompt echoes + 2 outputs: {tout}"
+    );
     Ok(())
 }

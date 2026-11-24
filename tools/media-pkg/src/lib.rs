@@ -87,7 +87,10 @@ fn collect_tree_files(
         } else {
             let rel = p
                 .strip_prefix(root)
-                .map_or_else(|_| p.to_string_lossy().into_owned(), |s| s.to_string_lossy().into_owned())
+                .map_or_else(
+                    |_| p.to_string_lossy().into_owned(),
+                    |s| s.to_string_lossy().into_owned(),
+                )
                 .replace(92 as char, "/");
             out.insert(rel, fs::read(&p)?);
         }
@@ -190,9 +193,12 @@ pub fn build_standalone_source_tarball(
     }
 
     let build_sh = standalone_build_sh(tc).into_bytes();
-    let makefile = String::from("all:
+    let makefile = String::from(
+        "all:
 	@sh ./build-standalone.sh
-").into_bytes();
+",
+    )
+    .into_bytes();
     let readme = format!(
         "# win-cmd-asm Standalone {tc} Source Distribution
 
@@ -228,13 +234,39 @@ fn write_and_record(
     Ok(())
 }
 
+fn read_first_built(build_dir: &Path, candidates: &[&str]) -> Result<Vec<u8>, ToolError> {
+    for &rel in &candidates[..candidates.len().saturating_sub(1)] {
+        let p = build_dir.join(rel);
+        if p.is_file() {
+            return Ok(fs::read(p)?);
+        }
+    }
+    let last = candidates.last().copied().unwrap_or("");
+    Ok(fs::read(build_dir.join(last))?)
+}
+
+fn emit_floppy_image(
+    out_dir: &Path,
+    fname: &str,
+    geom: FloppyGeom,
+    label: &[u8; 11],
+    owned: &[(String, Vec<u8>)],
+    records: &mut Vec<(String, usize, String)>,
+) -> Result<(), ToolError> {
+    let refs: Vec<(&str, &[u8])> = owned
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let img = build_fat12_floppy(fname, geom, label, &refs)?;
+    write_and_record(out_dir, fname, &img, records)
+}
+
 fn master_floppies(
     build_dir: &Path,
     out_dir: &Path,
     records: &mut Vec<(String, usize, String)>,
 ) -> Result<(), ToolError> {
     let dos_dir = build_dir.join("nasm/dos16");
-    let fasm_dos = build_dir.join("fasm/dos16");
     let win16_dir = build_dir.join("nasm/win16");
     let x32_dir = build_dir.join("nasm/x86_32");
 
@@ -242,7 +274,7 @@ fn master_floppies(
     autoexec.extend_from_slice(&[13, 10]);
     autoexec.extend_from_slice(b"VER");
     autoexec.extend_from_slice(&[13, 10]);
-    let mut base_owned: Vec<(String, Vec<u8>)> = vec![
+    let mut f_owned: Vec<(String, Vec<u8>)> = vec![
         (String::from("AUTOEXEC.BAT"), autoexec),
         (String::from("WINCMD.COM"), fs::read(dos_dir.join("WINCMD.COM"))?),
         (String::from("WINCMD1.COM"), fs::read(dos_dir.join("WINCMD1.COM"))?),
@@ -250,94 +282,83 @@ fn master_floppies(
         (String::from("ASMCONV.COM"), fs::read(dos_dir.join("ASMCONV.COM"))?),
     ];
     for &u in &DOS16_UTIL_COMS {
-        base_owned.push((u.to_owned(), fs::read(dos_dir.join(u))?));
+        f_owned.push((u.to_owned(), fs::read(dos_dir.join(u))?));
     }
+    emit_floppy_image(out_dir, "wincmd-dos-160k.img", FloppyGeom::F160K, b"WINCMD160K ", &f_owned, records)?;
 
-    // 1. 160K 1981 5.25" floppy (WINCMD + 19 .COM utilities)
-    let f160_refs: Vec<(&str, &[u8])> = base_owned
-        .iter()
-        .map(|(n, b)| (n.as_str(), b.as_slice()))
-        .collect();
-    let img160 = build_fat12_floppy(
-        "wincmd-dos-160k.img",
-        FloppyGeom::F160K,
-        b"WINCMD160K ",
-        &f160_refs,
-    )?;
-    write_and_record(out_dir, "wincmd-dos-160k.img", &img160, records)?;
-
-    // 2. 360K 5.25" floppy (+ WINCMDMZ.EXE)
-    let mut f360_owned = base_owned;
-    f360_owned.push((
+    f_owned.push((
         String::from("WINCMDMZ.EXE"),
-        fs::read(fasm_dos.join("WINCMDMZ.EXE"))?,
+        read_first_built(build_dir, &["fasm/dos16/WINCMDMZ.EXE", "jwasm/dos16/WINCMDMZ.EXE"])?,
     ));
-    let f360_refs: Vec<(&str, &[u8])> = f360_owned
-        .iter()
-        .map(|(n, b)| (n.as_str(), b.as_slice()))
-        .collect();
-    let img360 = build_fat12_floppy(
-        "wincmd-dos-360k.img",
-        FloppyGeom::F360K,
-        b"WINCMD360K ",
-        &f360_refs,
-    )?;
-    write_and_record(out_dir, "wincmd-dos-360k.img", &img360, records)?;
+    emit_floppy_image(out_dir, "wincmd-dos-360k.img", FloppyGeom::F360K, b"WINCMD360K ", &f_owned, records)?;
 
-    // 3. 720K 3.5" DD floppy (+ Win16 NE WINCMD16.EXE, WCMD286.EXE, WINCMD.PIF)
-    let mut f720_owned = f360_owned;
     for &(fat_name, src_name) in &[
         ("WINCMD.PIF", "WINCMD.PIF"),
         ("WINCMD16.EXE", "WINCMD16.EXE"),
         ("WCMD286.EXE", "WINCMD286.EXE"),
     ] {
-        f720_owned.push((fat_name.to_owned(), fs::read(win16_dir.join(src_name))?));
+        f_owned.push((fat_name.to_owned(), fs::read(win16_dir.join(src_name))?));
     }
-    let f720_refs: Vec<(&str, &[u8])> = f720_owned
-        .iter()
-        .map(|(n, b)| (n.as_str(), b.as_slice()))
-        .collect();
-    let img720 = build_fat12_floppy(
-        "wincmd-dos-win16-720k.img",
-        FloppyGeom::F720K,
-        b"WINCMD720K ",
-        &f720_refs,
-    )?;
-    write_and_record(out_dir, "wincmd-dos-win16-720k.img", &img720, records)?;
+    emit_floppy_image(out_dir, "wincmd-dos-win16-720k.img", FloppyGeom::F720K, b"WINCMD720K ", &f_owned, records)?;
 
-    // 4. 1.44M 3.5" HD floppy (+ WINCMD32.EXE, WINCMD64.EXE, ARM shells)
-    let mut f1440_owned = f720_owned;
-    f1440_owned.push((
-        String::from("WINCMD32.EXE"),
-        fs::read(x32_dir.join("WINCMD32.EXE"))?,
-    ));
-    f1440_owned.push((
+    f_owned.push((String::from("WINCMD32.EXE"), fs::read(x32_dir.join("WINCMD32.EXE"))?));
+    f_owned.push((
         String::from("WINCMD64.EXE"),
         fs::read(build_dir.join("nasm/x86_64/WINCMD64.EXE"))?,
     ));
-    f1440_owned.push((
-        String::from("WCMDARM4.EXE"),
-        fs::read(build_dir.join("fasmarm/arm32/WINCMD_ARMV4.EXE"))?,
-    ));
-    f1440_owned.push((
+    let armv4_path = build_dir.join("fasmarm/arm32/WINCMD_ARMV4.EXE");
+    if armv4_path.is_file() {
+        f_owned.push((String::from("WCMDARM4.EXE"), fs::read(armv4_path)?));
+    }
+    f_owned.push((
         String::from("WCMDARM7.EXE"),
-        fs::read(build_dir.join("fasmarm/arm32/WINCMD_ARM32.EXE"))?,
+        read_first_built(build_dir, &["fasmarm/arm32/WINCMD_ARM32.EXE", "llvm/arm32/WINCMD_ARM32.EXE"])?,
     ));
-    f1440_owned.push((
+    f_owned.push((
         String::from("WCMDA64.EXE"),
-        fs::read(build_dir.join("fasmarm/arm64/WINCMD_ARM64.EXE"))?,
+        read_first_built(build_dir, &["fasmarm/arm64/WINCMD_ARM64.EXE", "llvm/arm64/WINCMD_ARM64.EXE"])?,
     ));
-    let f1440_refs: Vec<(&str, &[u8])> = f1440_owned
-        .iter()
-        .map(|(n, b)| (n.as_str(), b.as_slice()))
-        .collect();
-    let img1440 = build_fat12_floppy(
-        "wincmd-full-1440k.img",
-        FloppyGeom::F1440K,
-        b"WINCMD1440K",
-        &f1440_refs,
+    emit_floppy_image(out_dir, "wincmd-full-1440k.img", FloppyGeom::F1440K, b"WINCMD1440K", &f_owned, records)
+}
+
+fn stage_dos_win16_zip(
+    build_dir: &Path,
+    out_dir: &Path,
+    iso_owned: &mut Vec<(String, Vec<u8>)>,
+    records: &mut Vec<(String, usize, String)>,
+) -> Result<(), ToolError> {
+    let mut dos_zip: Vec<(String, Vec<u8>)> = Vec::new();
+    for &core in &["WINCMD.COM", "WINCMD1.COM", "WINCMD.MSG", "ASMCONV.COM"] {
+        let b = fs::read(build_dir.join("nasm/dos16").join(core))?;
+        dos_zip.push((format!("dos16/{core}"), b.clone()));
+        iso_owned.push((format!("DOS16/{core}"), b));
+    }
+    let mz_b = read_first_built(
+        build_dir,
+        &["fasm/dos16/WINCMDMZ.EXE", "jwasm/dos16/WINCMDMZ.EXE"],
     )?;
-    write_and_record(out_dir, "wincmd-full-1440k.img", &img1440, records)
+    dos_zip.push((String::from("dos16/WINCMDMZ.EXE"), mz_b.clone()));
+    iso_owned.push((String::from("DOS16/WINCMDMZ.EXE"), mz_b));
+    for &u in &DOS16_UTIL_COMS {
+        let b = fs::read(build_dir.join("nasm/dos16").join(u))?;
+        dos_zip.push((format!("dos16/{u}"), b.clone()));
+        iso_owned.push((format!("DOS16/{u}"), b));
+    }
+    for &w in &["WINCMD.PIF", "WINCMD16.EXE", "WINCMD286.EXE"] {
+        let b = fs::read(build_dir.join("nasm/win16").join(w))?;
+        dos_zip.push((format!("win16/{w}"), b.clone()));
+        iso_owned.push((format!("WIN16/{w}"), b));
+    }
+    let dz_refs: Vec<(&str, &[u8])> = dos_zip
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_slice()))
+        .collect();
+    write_and_record(
+        out_dir,
+        "wincmd-dos-win16.zip",
+        &build_zip(&dz_refs),
+        records,
+    )
 }
 
 fn master_zips_and_iso(
@@ -352,59 +373,66 @@ fn master_zips_and_iso(
         (String::from("BUILD.CMD"), fs::read(repo_root.join("BUILD.CMD"))?),
         (String::from("MAKE.BAT"), fs::read(repo_root.join("make.bat"))?),
     ];
-
-    // DOS16 + Win16 ZIP
-    let mut dos_zip: Vec<(String, Vec<u8>)> = Vec::new();
-    for &core in &["WINCMD.COM", "WINCMD1.COM", "WINCMD.MSG", "ASMCONV.COM"] {
-        let b = fs::read(build_dir.join("nasm/dos16").join(core))?;
-        dos_zip.push((format!("dos16/{core}"), b.clone()));
-        iso_owned.push((format!("DOS16/{core}"), b));
-    }
-    let mz_b = fs::read(build_dir.join("fasm/dos16/WINCMDMZ.EXE"))?;
-    dos_zip.push((String::from("dos16/WINCMDMZ.EXE"), mz_b.clone()));
-    iso_owned.push((String::from("DOS16/WINCMDMZ.EXE"), mz_b));
-    for &u in &DOS16_UTIL_COMS {
-        let b = fs::read(build_dir.join("nasm/dos16").join(u))?;
-        dos_zip.push((format!("dos16/{u}"), b.clone()));
-        iso_owned.push((format!("DOS16/{u}"), b));
-    }
-    for &w in &["WINCMD.PIF", "WINCMD16.EXE", "WINCMD286.EXE"] {
-        let b = fs::read(build_dir.join("nasm/win16").join(w))?;
-        dos_zip.push((format!("win16/{w}"), b.clone()));
-        iso_owned.push((format!("WIN16/{w}"), b));
-    }
-    let dz_refs: Vec<(&str, &[u8])> = dos_zip.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
-    write_and_record(out_dir, "wincmd-dos-win16.zip", &build_zip(&dz_refs), records)?;
+    stage_dos_win16_zip(build_dir, out_dir, &mut iso_owned, records)?;
 
     // Per-ISA PE32 / PE32+ ZIPs + ISO staging
-    let pe_targets: &[(&str, &str, &str, &[&str])] = &[
-        ("wincmd-win32-x86.zip", "nasm/x86_32", "WIN32", &["WINCMD32.EXE"]),
-        ("wincmd-win64-x64.zip", "nasm/x86_64", "WIN64", &["WINCMD64.EXE"]),
+    let pe_targets: &[(&str, &[&str], &str, &[&str])] = &[
+        (
+            "wincmd-win32-x86.zip",
+            &["nasm/x86_32"],
+            "WIN32",
+            &["WINCMD32.EXE"],
+        ),
+        (
+            "wincmd-win64-x64.zip",
+            &["nasm/x86_64"],
+            "WIN64",
+            &["WINCMD64.EXE"],
+        ),
         (
             "wincmd-win-arm32.zip",
-            "fasmarm/arm32",
+            &["fasmarm/arm32", "llvm/arm32"],
             "ARM32",
             &["WINCMD_ARMV4.EXE", "WINCMD_ARM32.EXE"],
         ),
-        ("wincmd-win-arm64.zip", "fasmarm/arm64", "ARM64", &["WINCMD_ARM64.EXE"]),
+        (
+            "wincmd-win-arm64.zip",
+            &["fasmarm/arm64", "llvm/arm64"],
+            "ARM64",
+            &["WINCMD_ARM64.EXE"],
+        ),
     ];
-    for &(zip_name, bsub, iso_dir, shells) in pe_targets {
+    for &(zip_name, bsubs, iso_dir, shells) in pe_targets {
+        let chosen_sub = bsubs
+            .iter()
+            .copied()
+            .find(|s| build_dir.join(s).join("MEM.EXE").is_file())
+            .unwrap_or(bsubs[0]);
         let mut z_owned: Vec<(String, Vec<u8>)> = Vec::new();
         for &sh in shells {
-            let b = fs::read(build_dir.join(bsub).join(sh))?;
+            if sh == "WINCMD_ARMV4.EXE" && !build_dir.join(chosen_sub).join(sh).is_file() {
+                continue;
+            }
+            let b = fs::read(build_dir.join(chosen_sub).join(sh))?;
             z_owned.push((sh.to_owned(), b.clone()));
             iso_owned.push((format!("{iso_dir}/{sh}"), b));
         }
         for &u in &PE_UTIL_EXES {
-            let b = fs::read(build_dir.join(bsub).join(u))?;
+            let b = fs::read(build_dir.join(chosen_sub).join(u))?;
             z_owned.push((u.to_owned(), b.clone()));
             iso_owned.push((format!("{iso_dir}/{u}"), b));
         }
-        let z_refs: Vec<(&str, &[u8])> = z_owned.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
+        let z_refs: Vec<(&str, &[u8])> = z_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
         write_and_record(out_dir, zip_name, &build_zip(&z_refs), records)?;
     }
 
-    let iso_refs: Vec<(&str, &[u8])> = iso_owned.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
+    let iso_refs: Vec<(&str, &[u8])> = iso_owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_slice()))
+        .collect();
     let iso_bytes = build_iso9660("wincmd-win-universal.iso", "WINCMD_ASM", &iso_refs)?;
     write_and_record(out_dir, "wincmd-win-universal.iso", &iso_bytes, records)
 }
@@ -515,8 +543,11 @@ mod tests {
     fn fat12_all_geometries_roundtrip_and_error_guards() -> Result<(), ToolError> {
         let big = vec![0x5Au8; 1700];
         let files: &[(&str, &[u8])] = &[
-            ("AUTOEXEC.BAT", b"@ECHO OFF
-"),
+            (
+                "AUTOEXEC.BAT",
+                b"@ECHO OFF
+",
+            ),
             ("EMPTY.TXT", b""),
             ("README", b"NO_EXT"),
             ("BIGDATA.BIN", &big),
@@ -525,11 +556,22 @@ mod tests {
             let img = build_fat12_floppy("test.img", geom, b"TESTLABEL  ", files)?;
             assert_eq!(img.len(), geom.byte_capacity());
             let parsed = read_fat12_root_files("test.img", &img)?;
-            assert_eq!(parsed.get("AUTOEXEC.BAT").map(Vec::as_slice), Some(&b"@ECHO OFF
-"[..]));
+            assert_eq!(
+                parsed.get("AUTOEXEC.BAT").map(Vec::as_slice),
+                Some(
+                    &b"@ECHO OFF
+"[..]
+                )
+            );
             assert_eq!(parsed.get("EMPTY.TXT").map(Vec::as_slice), Some(&b""[..]));
-            assert_eq!(parsed.get("README").map(Vec::as_slice), Some(&b"NO_EXT"[..]));
-            assert_eq!(parsed.get("BIGDATA.BIN").map(Vec::as_slice), Some(big.as_slice()));
+            assert_eq!(
+                parsed.get("README").map(Vec::as_slice),
+                Some(&b"NO_EXT"[..])
+            );
+            assert_eq!(
+                parsed.get("BIGDATA.BIN").map(Vec::as_slice),
+                Some(big.as_slice())
+            );
         }
 
         assert!(format_fcb_83("bad.img", "TOO_LONG_STEM.TXT").is_err());
@@ -575,8 +617,14 @@ mod tests {
         let iso2 = build_iso9660("test.iso", "WINCMD_ISO", &entries)?;
         assert_eq!(sha256_hex(&iso1), sha256_hex(&iso2), "deterministic ISO");
         let parsed = read_iso9660_files("test.iso", &iso1)?;
-        assert_eq!(parsed.get("README.MD").map(Vec::as_slice), Some(&b"# Hello ISO"[..]));
-        assert_eq!(parsed.get("DOS/FILE_49.BIN").map(Vec::as_slice), Some(&b"x"[..]));
+        assert_eq!(
+            parsed.get("README.MD").map(Vec::as_slice),
+            Some(&b"# Hello ISO"[..])
+        );
+        assert_eq!(
+            parsed.get("DOS/FILE_49.BIN").map(Vec::as_slice),
+            Some(&b"x"[..])
+        );
         assert_eq!(
             parsed.get("WIN64/WINCMD64.EXE").map(Vec::as_slice),
             Some(payload_a.as_slice())
@@ -594,7 +642,10 @@ mod tests {
         );
         let z = build_zip(&[("a/hello.txt", b"hello"), ("b/empty.bin", b"")]);
         let zm = read_zip_entries("t.zip", &z)?;
-        assert_eq!(zm.get("a/hello.txt").map(Vec::as_slice), Some(&b"hello"[..]));
+        assert_eq!(
+            zm.get("a/hello.txt").map(Vec::as_slice),
+            Some(&b"hello"[..])
+        );
         assert!(read_zip_entries("bad.zip", &[1, 2, 3, 4]).is_err());
         let mut bad_crc_zip = z.clone();
         bad_crc_zip[41] ^= 0xFF;
@@ -606,8 +657,12 @@ mod tests {
         let tar = build_ustar(
             "t.tar",
             &[
-                ("short.sh", b"#!/bin/sh
-", true),
+                (
+                    "short.sh",
+                    b"#!/bin/sh
+",
+                    true,
+                ),
                 (&long_path, &multi_blk, false),
             ],
         )?;
@@ -615,11 +670,22 @@ mod tests {
         let un_gz = gunzip_stored("t.tar.gz", &gz)?;
         assert_eq!(un_gz, tar);
         let tm = read_ustar_entries("t.tar", &un_gz)?;
-        assert_eq!(tm.get(&long_path).map(Vec::as_slice), Some(multi_blk.as_slice()));
+        assert_eq!(
+            tm.get(&long_path).map(Vec::as_slice),
+            Some(multi_blk.as_slice())
+        );
 
         assert_eq!(gunzip_stored("empty.gz", &gzip_stored(b""))?, b"");
         assert!(gunzip_stored("short.gz", &[0x1F, 0x8B]).is_err());
-        assert!(gunzip_stored("trunc_hdr.gz", &[0x1F, 0x8B, 0x08, 0, 0, 0, 0, 0, 0, 0xFF, 1, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(
+            gunzip_stored(
+                "trunc_hdr.gz",
+                &[
+                    0x1F, 0x8B, 0x08, 0, 0, 0, 0, 0, 0, 0xFF, 1, 0, 0, 0, 0, 0, 0, 0
+                ]
+            )
+            .is_err()
+        );
         assert!(gunzip_stored("trunc_body.gz", &gz[..50]).is_err());
         let mut bad_blk = gz.clone();
         bad_blk[13] ^= 0xFF;
@@ -644,14 +710,24 @@ mod tests {
         assert!(run_cli(["media-pkg", "--dist-src"], &mut sink).is_err());
         assert!(run_cli(["media-pkg", "--out-dir"], &mut sink).is_err());
         assert!(
-            build_standalone_source_tarball(Path::new("/nonexistent"), Path::new("/nonexistent"), "badtc")
-                .is_err()
+            build_standalone_source_tarball(
+                Path::new("/nonexistent"),
+                Path::new("/nonexistent"),
+                "badtc"
+            )
+            .is_err()
         );
         assert!(
-            build_standalone_source_tarball(Path::new("/nonexistent"), Path::new("/nonexistent"), "nasm")
-                .is_err()
+            build_standalone_source_tarball(
+                Path::new("/nonexistent"),
+                Path::new("/nonexistent"),
+                "nasm"
+            )
+            .is_err()
         );
-        let rm = ReleaseManifest { artifacts: Vec::new() };
+        let rm = ReleaseManifest {
+            artifacts: Vec::new(),
+        };
         assert_eq!(rm.clone(), rm);
         assert_ne!(format!("{rm:?}"), "");
     }

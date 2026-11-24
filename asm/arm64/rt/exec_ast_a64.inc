@@ -304,6 +304,8 @@
     cbnz w0, .scan_file
     mov x0, #-1
     str x0, [x21, #BATCH_FRAME_A64.uFileOff]
+    mov w0, #1
+    strb w0, [x21, #BATCH_FRAME_A64.bJumped]
     mov w0, #0
     b .exit
 
@@ -354,12 +356,16 @@
     b .ln_lp
 
 .found:
+    mov w0, #1
+    strb w0, [x21, #BATCH_FRAME_A64.bJumped]
     mov w0, #0
     b .exit
 
 .not_found:
     mov x0, #-1
     str x0, [x21, #BATCH_FRAME_A64.uFileOff]
+    mov w0, #1
+    strb w0, [x21, #BATCH_FRAME_A64.bJumped]
 .err1:
     mov w0, #1
 .exit:
@@ -417,6 +423,7 @@
     bl batch_read_logical_line_a64
     cbz w0, .unwind_restore_arena
 
+    strb wzr, [x21, #BATCH_FRAME_A64.bJumped]
     mov x0, x22
     mov w1, #1
     bl exec_line_str_a64
@@ -1507,7 +1514,17 @@
     cbnz w1, .cur_err
     ldrb w1, [x0, #ARM64_CTX.bCtrlBreak]
     cbnz w1, .cur_err
+    ldr w1, [x0, #ARM64_CTX.dwBatchDepth]
+    cbz w1, .chk_kind
+    sub w1, w1, #1
+    uxtw x1, w1
+    lsl x1, x1, #6
+    ldr x2, [x0, #ARM64_CTX.pBatchStack]
+    add x2, x2, x1
+    ldrb w1, [x2, #BATCH_FRAME_A64.bJumped]
+    cbnz w1, .cur_err
 
+.chk_kind:
     ldrb w1, [x19, #AST_NODE_A64.bKind]
     cmp w1, #AST_SIMPLE_CMD
     b.eq .do_simple

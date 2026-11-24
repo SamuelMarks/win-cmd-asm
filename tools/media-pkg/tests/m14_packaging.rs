@@ -26,11 +26,19 @@ fn verify_media_contents(root: &Path, out_a: &Path) -> Result<(), ToolError> {
     for (fname, geom, must_have) in [
         ("wincmd-dos-160k.img", FloppyGeom::F160K, "WHOAMI.COM"),
         ("wincmd-dos-360k.img", FloppyGeom::F360K, "WINCMDMZ.EXE"),
-        ("wincmd-dos-win16-720k.img", FloppyGeom::F720K, "WCMD286.EXE"),
+        (
+            "wincmd-dos-win16-720k.img",
+            FloppyGeom::F720K,
+            "WCMD286.EXE",
+        ),
         ("wincmd-full-1440k.img", FloppyGeom::F1440K, "WCMDA64.EXE"),
     ] {
         let raw = fs::read(out_a.join(fname))?;
-        assert_eq!(raw.len(), geom.byte_capacity(), "{fname} exact floppy geometry");
+        assert_eq!(
+            raw.len(),
+            geom.byte_capacity(),
+            "{fname} exact floppy geometry"
+        );
         let files = read_fat12_root_files(fname, &raw)?;
         assert_eq!(files.get("WINCMD.COM"), Some(&expected_wincmd));
         assert!(files.contains_key(must_have), "{fname} missing {must_have}");
@@ -96,19 +104,23 @@ fn verify_standalone_tarballs(root: &Path, out_a: &Path, scratch: &Path) -> Resu
             fs::write(&dst, data)?;
         }
 
-        let probe = Command::new("sh")
+        let has_tc_sh = Command::new("sh")
             .arg("-c")
             .arg(format!("command -v {tc} >/dev/null 2>&1"))
             .env("PATH", &full_path)
-            .status()?;
-        if probe.success() {
+            .status()
+            .is_ok_and(|s| s.success());
+        if has_tc_sh {
             let sub = work.join(format!("wincmd-src-{tc}"));
             let status = Command::new("sh")
                 .arg("./build-standalone.sh")
                 .current_dir(&sub)
                 .env("PATH", &full_path)
                 .status()?;
-            assert!(status.success(), "standalone zero-Rust `{tc}` tarball build failed");
+            assert!(
+                status.success(),
+                "standalone zero-Rust `{tc}` tarball build failed"
+            );
             let built_com = fs::read(sub.join("build/dos16/WINCMD.COM"))?;
             assert_eq!(
                 built_com.len(),
@@ -150,7 +162,10 @@ fn m14_reproducible_release_media_and_standalone_tarballs() -> Result<(), ToolEr
     // Run 2 via compiled CLI binary (`main.rs`) to verify bit-for-bit reproducibility!
     let bin = env!("CARGO_BIN_EXE_media-pkg");
     let bad_status = Command::new(bin).arg("--invalid-flag").output()?;
-    assert!(!bad_status.status.success(), "media-pkg CLI invalid flag exits non-zero");
+    assert!(
+        !bad_status.status.success(),
+        "media-pkg CLI invalid flag exits non-zero"
+    );
 
     let status = Command::new(bin)
         .args([
@@ -168,7 +183,10 @@ fn m14_reproducible_release_media_and_standalone_tarballs() -> Result<(), ToolEr
 
     let sums_a = fs::read_to_string(out_a.join("SHA256SUMS.txt"))?;
     let sums_b = fs::read_to_string(out_b.join("SHA256SUMS.txt"))?;
-    assert_eq!(sums_a, sums_b, "100% deterministic SHA256SUMS.txt across runs");
+    assert_eq!(
+        sums_a, sums_b,
+        "100% deterministic SHA256SUMS.txt across runs"
+    );
     assert_eq!(sums_a.lines().count(), 13);
 
     for line in sums_a.lines() {

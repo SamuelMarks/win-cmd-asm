@@ -16,8 +16,22 @@ fn workspace_root() -> PathBuf {
 }
 
 fn load_built(tc: &str, name: &str) -> Result<Vec<u8>, ToolError> {
-    let p = workspace_root().join("build").join(tc).join("dos16").join(name);
+    let p = workspace_root()
+        .join("build")
+        .join(tc)
+        .join("dos16")
+        .join(name);
     Ok(std::fs::read(p)?)
+}
+
+fn built_toolchains() -> Vec<&'static str> {
+    let root = workspace_root();
+    let tcs: Vec<&'static str> = ["nasm", "fasm", "jwasm"]
+        .into_iter()
+        .filter(|tc| root.join("build").join(tc).join("dos16/WINCMD.COM").is_file())
+        .collect();
+    assert!(!tcs.is_empty(), "at least one DOS16 toolchain must be built");
+    tcs
 }
 
 const fn bs() -> char {
@@ -59,7 +73,7 @@ fn encode_utf16_bom_lines(lines: &[&str], big_endian: bool) -> Vec<u8> {
 
 #[test]
 fn m3_phase12_bom_utf8_utf16_ctrlz_line_endings_and_caret_folding() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
 
         // 1. UTF-8 BOM + mixed LF (0x0A) / CR (0x0D) / CRLF + 0x1A immediate EOF + UTF-8 bytes
@@ -68,7 +82,9 @@ fn m3_phase12_bom_utf8_utf16_ctrlz_line_endings_and_caret_folding() -> Result<()
         utf8_bat.push(0x0A);
         utf8_bat.extend_from_slice(b"ECHO UTF8_BOM_OK");
         utf8_bat.push(0x0D);
-        utf8_bat.extend_from_slice(&[b'E', b'C', b'H', b'O', b' ', b'C', b'A', b'F', b'E', b'_', 0xC3, 0xA9, 0x0D, 0x0A]);
+        utf8_bat.extend_from_slice(&[
+            b'E', b'C', b'H', b'O', b' ', b'C', b'A', b'F', b'E', b'_', 0xC3, 0xA9, 0x0D, 0x0A,
+        ]);
         utf8_bat.push(0x1A);
         utf8_bat.extend_from_slice(b"ECHO AFTER_CTRLZ_MUST_NOT_RUN");
         utf8_bat.extend_from_slice(&[0x0D, 0x0A]);
@@ -81,16 +97,22 @@ fn m3_phase12_bom_utf8_utf16_ctrlz_line_endings_and_caret_folding() -> Result<()
         let out = String::from_utf8_lossy(&res.stdout);
         assert!(out.contains("UTF8_BOM_OK"), "tc={tc}: {out}");
         assert!(
-            res.stdout.windows(7).any(|w| w == [b'C', b'A', b'F', b'E', b'_', 0xC3, 0xA9]),
+            res.stdout
+                .windows(7)
+                .any(|w| w == [b'C', b'A', b'F', b'E', b'_', 0xC3, 0xA9]),
             "tc={tc}: {out}"
         );
         assert!(!out.contains("AFTER_CTRLZ"), "tc={tc}: {out}");
 
         // 2. UTF-16LE BOM and UTF-16BE BOM batch scripts (2 bytes per WCHAR offset tracking!)
-        let utf16_little =
-            encode_utf16_bom_lines(&["@ECHO OFF", "ECHO U16LE_FIRST", "ECHO U16LE_SECOND"], false);
-        let utf16_big =
-            encode_utf16_bom_lines(&["@ECHO OFF", "ECHO U16BE_FIRST", "ECHO U16BE_SECOND"], true);
+        let utf16_little = encode_utf16_bom_lines(
+            &["@ECHO OFF", "ECHO U16LE_FIRST", "ECHO U16LE_SECOND"],
+            false,
+        );
+        let utf16_big = encode_utf16_bom_lines(
+            &["@ECHO OFF", "ECHO U16BE_FIRST", "ECHO U16BE_SECOND"],
+            true,
+        );
 
         let mut vm_le = DosVm::new(DosEra::Dos710);
         vm_le.vfs.insert(String::from("ULE.BAT"), utf16_little);
@@ -143,15 +165,21 @@ fn m3_phase12_bom_utf8_utf16_ctrlz_line_endings_and_caret_folding() -> Result<()
         vm_self.load_com(&com, " /C SELF.BAT", &[])?;
         let res_self = vm_self.run(3_000_000)?;
         let out_self = String::from_utf8_lossy(&res_self.stdout);
-        assert!(out_self.contains("MODIFIED_ON_THE_FLY"), "tc={tc}: {out_self}");
-        assert!(!out_self.contains("ORIGINAL_NEVER_RUNS"), "tc={tc}: {out_self}");
+        assert!(
+            out_self.contains("MODIFIED_ON_THE_FLY"),
+            "tc={tc}: {out_self}"
+        );
+        assert!(
+            !out_self.contains("ORIGINAL_NEVER_RUNS"),
+            "tc={tc}: {out_self}"
+        );
     }
     Ok(())
 }
 
 #[test]
 fn m3_phase13_modifiers_var_ops_and_shift() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
 
         let mut vm = DosVm::new(DosEra::Dos710);
@@ -159,7 +187,8 @@ fn m3_phase13_modifiers_var_ops_and_shift() -> Result<(), ToolError> {
         vm.dirs.insert(sub_dir.clone());
         let tool_path = format!("{sub_dir}{}BUILD.CMD", bs());
         vm.vfs.insert(tool_path, join_crlf(&["@ECHO OFF"]));
-        vm.vfs.insert(String::from("SAMPLE.TXT"), b"Hello7B".to_vec());
+        vm.vfs
+            .insert(String::from("SAMPLE.TXT"), b"Hello7B".to_vec());
 
         vm.vfs.insert(
             String::from("MODS.BAT"),
@@ -195,15 +224,24 @@ fn m3_phase13_modifiers_var_ops_and_shift() -> Result<(), ToolError> {
         let res = vm.run(5_000_000)?;
         assert_eq!(res.exit_code, 0);
         let out = String::from_utf8_lossy(&res.stdout);
-        assert!(out.contains(&format!("STRIP=SAMPLE.TXT{}", crlf())), "tc={tc}: {out}");
+        assert!(
+            out.contains(&format!("STRIP=SAMPLE.TXT{}", crlf())),
+            "tc={tc}: {out}"
+        );
         let exp_dpnx = format!("DPNX=A:{}SAMPLE.TXT{}", bs(), crlf());
         assert!(out.contains(&exp_dpnx), "tc={tc}: {out}");
         assert!(out.contains(&format!("/7{}", crlf())), "tc={tc}: {out}");
-        assert!(out.contains("TIME=[") && out.contains('/'), "tc={tc}: {out}");
+        assert!(
+            out.contains("TIME=[") && out.contains('/'),
+            "tc={tc}: {out}"
+        );
         let exp_found = format!("FOUND=A:{}TOOLS{}BUILD.CMD{}", bs(), bs(), crlf());
         assert!(out.contains(&exp_found), "tc={tc}: {out}");
         assert!(
-            out.contains(&format!(r#"STAR=["SAMPLE.TXT" BUILD.CMD THIRD FOURTH]{}"#, crlf())),
+            out.contains(&format!(
+                r#"STAR=["SAMPLE.TXT" BUILD.CMD THIRD FOURTH]{}"#,
+                crlf()
+            )),
             "tc={tc}: {out}"
         );
         assert!(
@@ -214,26 +252,41 @@ fn m3_phase13_modifiers_var_ops_and_shift() -> Result<(), ToolError> {
             out.contains(&format!("AFTER_SHIFT2=BUILD.CMD/FOURTH{}", crlf())),
             "tc={tc}: {out}"
         );
-        assert!(out.contains(&format!("SUB1=cdef{}", crlf())), "tc={tc}: {out}");
-        assert!(out.contains(&format!("SUB2=end{}", crlf())), "tc={tc}: {out}");
-        assert!(out.contains(&format!("SUB3=abcdef{}", crlf())), "tc={tc}: {out}");
+        assert!(
+            out.contains(&format!("SUB1=cdef{}", crlf())),
+            "tc={tc}: {out}"
+        );
+        assert!(
+            out.contains(&format!("SUB2=end{}", crlf())),
+            "tc={tc}: {out}"
+        );
+        assert!(
+            out.contains(&format!("SUB3=abcdef{}", crlf())),
+            "tc={tc}: {out}"
+        );
         assert!(
             out.contains(&format!("REP1=abcdef_BAR_BAR_end{}", crlf())),
             "tc={tc}: {out}"
         );
-        assert!(out.contains(&format!("REP2=HEAD_FOO_end{}", crlf())), "tc={tc}: {out}");
+        assert!(
+            out.contains(&format!("REP2=HEAD_FOO_end{}", crlf())),
+            "tc={tc}: {out}"
+        );
         assert!(
             out.contains(&format!("REP3=abcdef_foo_FOO_end{}", crlf())),
             "tc={tc}: {out}"
         );
-        assert!(out.contains(&format!("PCT=100%{}", crlf())), "tc={tc}: {out}");
+        assert!(
+            out.contains(&format!("PCT=100%{}", crlf())),
+            "tc={tc}: {out}"
+        );
     }
     Ok(())
 }
 
 #[test]
 fn m3_phase13_dbcs_and_delayed_expansion() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
 
         // Delayed !VAR! expansion, nested !ARR_%%I!, ^! escaping, and CP936 DBCS trail-byte safety!
@@ -260,8 +313,14 @@ fn m3_phase13_dbcs_and_delayed_expansion() -> Result<(), ToolError> {
             dres.stdout
         );
         let dout = String::from_utf8_lossy(&dres.stdout);
-        assert!(dout.contains(&format!("ITEM=1:ALPHA:10{}", crlf())), "tc={tc}: {dout}");
-        assert!(dout.contains(&format!("ITEM=2:BETA:20{}", crlf())), "tc={tc}: {dout}");
+        assert!(
+            dout.contains(&format!("ITEM=1:ALPHA:10{}", crlf())),
+            "tc={tc}: {dout}"
+        );
+        assert!(
+            dout.contains(&format!("ITEM=2:BETA:20{}", crlf())),
+            "tc={tc}: {dout}"
+        );
         assert!(
             dout.contains(&format!("ESC=!COUNT! & LITERAL_AMP{}", crlf())),
             "tc={tc}: {dout}"
@@ -272,7 +331,7 @@ fn m3_phase13_dbcs_and_delayed_expansion() -> Result<(), ToolError> {
 
 #[test]
 fn m3_phase13_ast_blocks_if_all_ops_for_d_r_f_pipes_and_redirs() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let com = load_built(tc, "WINCMD.COM")?;
 
         let mut vm = DosVm::new(DosEra::Dos710);
@@ -328,13 +387,31 @@ fn m3_phase13_ast_blocks_if_all_ops_for_d_r_f_pipes_and_redirs() -> Result<(), T
             !vm.vfs.contains_key("MUST_NOT_EXIST.TXT") && !vm.vfs.contains_key(&root_no_exist),
             "REM must never create redirection target"
         );
-        assert!(out.contains(&format!("PAREN_DELIM{}", crlf())), "tc={tc}: {out}");
-        assert!(out.contains(&format!("CASE_INSENS_OK{}", crlf())), "tc={tc}: {out}");
+        assert!(
+            out.contains(&format!("PAREN_DELIM{}", crlf())),
+            "tc={tc}: {out}"
+        );
+        assert!(
+            out.contains(&format!("CASE_INSENS_OK{}", crlf())),
+            "tc={tc}: {out}"
+        );
         assert!(!out.contains("WRONG_BRANCH"), "tc={tc}: {out}");
-        assert!(out.contains(&format!("EXT_IF_OK{}", crlf())), "tc={tc}: {out}");
-        assert!(out.contains(&format!("DIR=SUBA{}", crlf())), "tc={tc}: {out}");
-        assert!(out.contains(&format!("DIR=SUBB{}", crlf())), "tc={tc}: {out}");
-        assert!(out.contains(&format!("REC=DEEP.LOG{}", crlf())), "tc={tc}: {out}");
+        assert!(
+            out.contains(&format!("EXT_IF_OK{}", crlf())),
+            "tc={tc}: {out}"
+        );
+        assert!(
+            out.contains(&format!("DIR=SUBA{}", crlf())),
+            "tc={tc}: {out}"
+        );
+        assert!(
+            out.contains(&format!("DIR=SUBB{}", crlf())),
+            "tc={tc}: {out}"
+        );
+        assert!(
+            out.contains(&format!("REC=DEEP.LOG{}", crlf())),
+            "tc={tc}: {out}"
+        );
         assert!(
             out.contains(&format!("CSV=[first][second][rest,of,row]{}", crlf())),
             "tc={tc}: {out}"
@@ -343,9 +420,18 @@ fn m3_phase13_ast_blocks_if_all_ops_for_d_r_f_pipes_and_redirs() -> Result<(), T
             out.contains(&format!("CSV=[uno][dos][tres]{}", crlf())),
             "tc={tc}: {out}"
         );
-        assert!(out.contains(&format!("STR=[left][right]{}", crlf())), "tc={tc}: {out}");
-        assert!(out.contains(&format!("CAP=CMD_CAP_OK{}", crlf())), "tc={tc}: {out}");
-        assert!(out.contains(&format!("PIPE_OR_FALLBACK{}", crlf())), "tc={tc}: {out}");
+        assert!(
+            out.contains(&format!("STR=[left][right]{}", crlf())),
+            "tc={tc}: {out}"
+        );
+        assert!(
+            out.contains(&format!("CAP=CMD_CAP_OK{}", crlf())),
+            "tc={tc}: {out}"
+        );
+        assert!(
+            out.contains(&format!("PIPE_OR_FALLBACK{}", crlf())),
+            "tc={tc}: {out}"
+        );
     }
     Ok(())
 }

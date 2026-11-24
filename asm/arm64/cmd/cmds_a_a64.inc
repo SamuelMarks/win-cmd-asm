@@ -1313,6 +1313,8 @@
     add x2, x2, x1
     mov x1, #-1
     str x1, [x2, #BATCH_FRAME_A64.uFileOff]
+    mov w1, #1
+    strb w1, [x2, #BATCH_FRAME_A64.bJumped]
     mov w0, w23
     b .done
 

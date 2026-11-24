@@ -440,12 +440,7 @@ impl DosVm {
     ///
     /// Returns [`ToolError::Emulator`] if the `MZ`/`NE` headers, segment table, or relocations
     /// are malformed.
-    pub fn load_ne(
-        &mut self,
-        image: &[u8],
-        era: Win16Era,
-        cmdline: &str,
-    ) -> Result<(), ToolError> {
+    pub fn load_ne(&mut self, image: &[u8], era: Win16Era, cmdline: &str) -> Result<(), ToolError> {
         let lfanew = validate_mz_ne(image)?;
         let ne_autodata = usize::from(read_le16(image, lfanew + 0x0E));
         let ne_heap = read_le16(image, lfanew + 0x10);
@@ -660,7 +655,9 @@ impl DosVm {
                                     cs: segs.selectors[s_idx],
                                     ip: u16::try_from(patch_off).unwrap_or(0),
                                     code: ErrCode::InvalidFunction,
-                                    message: format!("unresolved Win16 NE import {mname}.{target2}"),
+                                    message: format!(
+                                        "unresolved Win16 NE import {mname}.{target2}"
+                                    ),
                                 }
                             })?;
                             (api.trap_ip(), Win16State::THUNK_CS_SEL)
@@ -763,11 +760,7 @@ impl DosVm {
     }
 
     /// Validates a Protected-Mode selector load into `sreg_idx` (`ES`, `CS`, `SS`, `DS`).
-    pub(crate) fn validate_pmode_sreg(
-        &self,
-        sreg_idx: usize,
-        sel: u16,
-    ) -> Result<(), ToolError> {
+    pub(crate) fn validate_pmode_sreg(&self, sreg_idx: usize, sel: u16) -> Result<(), ToolError> {
         let Some(pm) = &self.pmode else {
             return Ok(());
         };
@@ -955,7 +948,10 @@ impl DosVm {
             Win16Api::GlobalAlloc => self.win16_global_alloc(),
             Win16Api::GlobalLock => {
                 let hmem = self.read_far_arg_u16(0);
-                let valid = self.pmode.as_ref().is_some_and(|pm| pm.ldt.contains_key(&hmem));
+                let valid = self
+                    .pmode
+                    .as_ref()
+                    .is_some_and(|pm| pm.ldt.contains_key(&hmem));
                 self.regs[0] = 0;
                 self.regs[2] = if valid { hmem } else { 0 };
             }
@@ -1049,7 +1045,10 @@ impl DosVm {
             .read_asciiz(self.read_far_arg_u16(2), self.read_far_arg_u16(0))
             .to_ascii_uppercase();
         let era = self.pmode.as_ref().map_or(Win16Era::Win104, |p| p.era);
-        let is_3x = matches!(era, Win16Era::Win310 | Win16Era::Wfw311 | Win16Era::Win320Cjk);
+        let is_3x = matches!(
+            era,
+            Win16Era::Win310 | Win16Era::Wfw311 | Win16Era::Win320Cjk
+        );
         self.regs[0] = match name.trim_end_matches(".DLL").trim_end_matches(".DRV") {
             "KERNEL" => 1,
             "USER" => 2,
@@ -1156,10 +1155,7 @@ impl DosVm {
         let hf = self.read_far_arg_u16(6);
         let mut tmp = Vec::with_capacity(count);
         for i in 0..count {
-            tmp.push(self.read_u8(
-                buf_sel,
-                buf_off.wrapping_add(u16::try_from(i).unwrap_or(0)),
-            ));
+            tmp.push(self.read_u8(buf_sel, buf_off.wrapping_add(u16::try_from(i).unwrap_or(0))));
         }
         if let Some(of) = self.handles.get_mut(&hf) {
             let path = of.path.clone();
@@ -1473,10 +1469,9 @@ impl DosVm {
                 let x = self.read_far_arg_u16(8);
                 let mut row = Vec::with_capacity(cb);
                 for i in 0..cb {
-                    row.push(self.read_u8(
-                        s_sel,
-                        s_off.wrapping_add(u16::try_from(i).unwrap_or(0)),
-                    ));
+                    row.push(
+                        self.read_u8(s_sel, s_off.wrapping_add(u16::try_from(i).unwrap_or(0))),
+                    );
                 }
                 if let Some(pm) = &mut self.pmode {
                     pm.text_out_calls.push((x, y, row));
@@ -1686,7 +1681,10 @@ fn resolve_ordinal_import(module: &str, ordinal: u16) -> Option<Win16Api> {
 }
 
 const fn resolve_dynamic_ordinal(hmod: u16, ordinal: u16, era: Win16Era) -> Option<Win16Api> {
-    let is_3x = matches!(era, Win16Era::Win310 | Win16Era::Wfw311 | Win16Era::Win320Cjk);
+    let is_3x = matches!(
+        era,
+        Win16Era::Win310 | Win16Era::Wfw311 | Win16Era::Win320Cjk
+    );
     match (hmod, ordinal) {
         (1, 166) if is_3x => Some(Win16Api::WinExec),
         (1, 169) if is_3x => Some(Win16Api::GetFreeSpace),
@@ -1700,13 +1698,18 @@ const fn resolve_dynamic_ordinal(hmod: u16, ordinal: u16, era: Win16Era) -> Opti
 }
 
 fn resolve_dynamic_name(hmod: u16, sym: &str, era: Win16Era) -> Option<Win16Api> {
-    let is_3x = matches!(era, Win16Era::Win310 | Win16Era::Wfw311 | Win16Era::Win320Cjk);
+    let is_3x = matches!(
+        era,
+        Win16Era::Win310 | Win16Era::Wfw311 | Win16Era::Win320Cjk
+    );
     match (hmod, sym) {
         (1, "WINEXEC") if is_3x => Some(Win16Api::WinExec),
         (1, "GETFREESPACE") if is_3x => Some(Win16Api::GetFreeSpace),
         (1, "ISDBCSLEADBYTE") if is_3x => Some(Win16Api::IsDbcsLeadByte),
         (2, "GETFREESYSTEMRESOURCES") if is_3x => Some(Win16Api::GetFreeSystemResources),
-        (2 | 6, "WNETADDCONNECTION") if era == Win16Era::Wfw311 => Some(Win16Api::WNetAddConnection),
+        (2 | 6, "WNETADDCONNECTION") if era == Win16Era::Wfw311 => {
+            Some(Win16Api::WNetAddConnection)
+        }
         (2 | 6, "WNETCANCELCONNECTION") if era == Win16Era::Wfw311 => {
             Some(Win16Api::WNetCancelConnection)
         }

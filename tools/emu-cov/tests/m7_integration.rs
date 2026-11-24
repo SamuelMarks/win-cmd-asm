@@ -45,6 +45,16 @@ fn load_w32(tc: &str) -> Result<Vec<u8>, ToolError> {
     )?)
 }
 
+fn built_toolchains() -> Vec<&'static str> {
+    let root = repo_root();
+    let tcs: Vec<&'static str> = ["nasm", "fasm", "jwasm"]
+        .into_iter()
+        .filter(|tc| root.join(format!("build/{tc}/x86_32/WINCMD32.EXE")).is_file())
+        .collect();
+    assert!(!tcs.is_empty(), "at least one IA-32 toolchain must be built");
+    tcs
+}
+
 fn rva_to_file_offset(pe: &[u8], lfanew: usize, rva: u32) -> Option<usize> {
     let num_secs = usize::from(u16::from_le_bytes([
         pe.get(lfanew + 6).copied()?,
@@ -127,12 +137,14 @@ fn verify_safeseh_load_config(
     image_base: u32,
 ) -> Result<(), ToolError> {
     let lcfg_rva = u32::from_le_bytes([pe[opt + 176], pe[opt + 177], pe[opt + 178], pe[opt + 179]]);
-    assert_ne!(lcfg_rva, 0, "{tc} /SAFESEH LOAD_CONFIG RVA must be non-zero");
-    let lcfg_off =
-        rva_to_file_offset(pe, lfanew, lcfg_rva).ok_or_else(|| ToolError::Syntax {
-            span: SourceSpan::new("WINCMD32.EXE", 1, 1),
-            message: format!("{tc} invalid LOAD_CONFIG RVA"),
-        })?;
+    assert_ne!(
+        lcfg_rva, 0,
+        "{tc} /SAFESEH LOAD_CONFIG RVA must be non-zero"
+    );
+    let lcfg_off = rva_to_file_offset(pe, lfanew, lcfg_rva).ok_or_else(|| ToolError::Syntax {
+        span: SourceSpan::new("WINCMD32.EXE", 1, 1),
+        message: format!("{tc} invalid LOAD_CONFIG RVA"),
+    })?;
     let lcfg_sz = u32::from_le_bytes([
         pe[lcfg_off],
         pe[lcfg_off + 1],
@@ -154,20 +166,22 @@ fn verify_safeseh_load_config(
     assert_eq!(lcfg_sz, 72, "{tc} 72-byte IMAGE_LOAD_CONFIG_DIRECTORY32");
     assert_eq!(seh_cnt, 1, "{tc} exactly 1 registered /SAFESEH handler");
     assert!(seh_tbl_va > image_base, "{tc} valid SEHandlerTable VA");
-    let seh_tbl_off =
-        rva_to_file_offset(pe, lfanew, seh_tbl_va - image_base).ok_or_else(|| {
-            ToolError::Syntax {
-                span: SourceSpan::new("WINCMD32.EXE", 1, 1),
-                message: format!("{tc} invalid SEHandlerTable RVA"),
-            }
-        })?;
+    let seh_tbl_off = rva_to_file_offset(pe, lfanew, seh_tbl_va - image_base).ok_or_else(|| {
+        ToolError::Syntax {
+            span: SourceSpan::new("WINCMD32.EXE", 1, 1),
+            message: format!("{tc} invalid SEHandlerTable RVA"),
+        }
+    })?;
     let handler_rva = u32::from_le_bytes([
         pe[seh_tbl_off],
         pe[seh_tbl_off + 1],
         pe[seh_tbl_off + 2],
         pe[seh_tbl_off + 3],
     ]);
-    assert!(handler_rva >= 0x1000, "{tc} _w32_seh_handler RVA inside .text");
+    assert!(
+        handler_rva >= 0x1000,
+        "{tc} _w32_seh_handler RVA inside .text"
+    );
     Ok(())
 }
 
@@ -262,7 +276,7 @@ fn m7_pe32_headers_safeseh_loadconfig_and_nt31_iat_across_assemblers() -> Result
         "k32_x86.def export baseline must load"
     );
 
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let pe = load_w32(tc)?;
         assert!(
             pe.len() <= 131_072,
@@ -312,7 +326,13 @@ fn detect_win32_runner() -> Option<Win32Runner> {
     if cfg!(target_os = "windows") {
         return Some(Win32Runner::Native);
     }
-    let st = Command::new("wine").arg("--version").output().ok()?;
+    let probe_exe = repo_root().join("build/nasm/x86_32/WINCMD32.EXE");
+    let st = Command::new("wine")
+        .env("WINEDEBUG", "-all")
+        .arg(&probe_exe)
+        .args(["/C", "VER"])
+        .output()
+        .ok()?;
     if st.status.success() {
         Some(Win32Runner::Wine)
     } else {
@@ -523,10 +543,7 @@ fn verify_utf16_and_legacy_modes(
     let win_nt31 = win_join(win_tc_dir, "nt31.bat");
     let (nt31_code, nt31_stdout, _) =
         run_wincmd32(runner, exe, &["--nt31-api-cap", "/C", &win_nt31])?;
-    assert_eq!(
-        nt31_code, 0,
-        "{tc} --nt31-api-cap rc=0 (out={nt31_stdout})"
-    );
+    assert_eq!(nt31_code, 0, "{tc} --nt31-api-cap rc=0 (out={nt31_stdout})");
     assert!(
         nt31_stdout.contains("3.10.528"),
         "{tc} NT 3.1 Build 528 VER: {nt31_stdout}"
@@ -539,8 +556,8 @@ fn verify_utf16_and_legacy_modes(
 }
 
 #[test]
-fn m7_live_win32_nt_win9x_pipes_registry_mklink_and_vm8086_across_assemblers() -> Result<(), ToolError>
-{
+fn m7_live_win32_nt_win9x_pipes_registry_mklink_and_vm8086_across_assemblers()
+-> Result<(), ToolError> {
     let Some(runner) = detect_win32_runner() else {
         return Ok(());
     };
@@ -551,7 +568,7 @@ fn m7_live_win32_nt_win9x_pipes_registry_mklink_and_vm8086_across_assemblers() -
     let win_scratch = to_win_path(runner, &scratch);
     let com_hostname = to_win_path(runner, &root.join("build/nasm/dos16/HOSTNAME.COM"));
 
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let exe = root.join(format!("build/{tc}/x86_32/WINCMD32.EXE"));
         let tc_dir = scratch.join(tc);
         std::fs::create_dir_all(&tc_dir)?;

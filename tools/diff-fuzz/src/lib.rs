@@ -312,7 +312,7 @@ pub struct CrossIsaSuite {
     win16_imgs: Vec<(String, Vec<u8>)>,
     x86_32_imgs: Vec<(String, Vec<u8>)>,
     x86_64_imgs: Vec<(String, Vec<u8>)>,
-    armv4_img: Vec<u8>,
+    armv4_img: Option<Vec<u8>>,
     arm32_imgs: Vec<(String, Vec<u8>)>,
     arm64_imgs: Vec<(String, Vec<u8>)>,
 }
@@ -356,7 +356,12 @@ impl CrossIsaSuite {
         if p_fasm_coff64.is_file() {
             x86_64_imgs.push((String::from("fasm-coff/x86_64"), fs::read(p_fasm_coff64)?));
         }
-        let armv4_img = fs::read(build_dir.join("fasmarm/arm32/WINCMD_ARMV4.EXE"))?;
+        let p_armv4 = build_dir.join("fasmarm/arm32/WINCMD_ARMV4.EXE");
+        let armv4_img = if p_armv4.is_file() {
+            Some(fs::read(p_armv4)?)
+        } else {
+            None
+        };
         let mut arm32_imgs = Vec::new();
         let mut arm64_imgs = Vec::new();
         for tc in ["fasmarm", "llvm"] {
@@ -489,7 +494,8 @@ fn verify_win16_fuzz_case(
     let mut wvm = DosVm::new(DosEra::Dos400);
     wvm.vfs
         .insert(String::from("FUZZ16.BAT"), case.win16_bat_bytes.clone());
-    wvm.vfs.insert(String::from("IN.TXT"), case.in_payload.clone());
+    wvm.vfs
+        .insert(String::from("IN.TXT"), case.in_payload.clone());
     wvm.load_ne(w16_img, Win16Era::Wfw311, "/K FUZZ16.BAT")?;
     wvm.push_win16_msg(0x000F, 0, 0);
     for &ch in format!("EXIT {}", case.expected_exit).as_bytes() {
@@ -537,9 +543,12 @@ fn run_single_cross_isa_case(
 
     // 1. 8086 Real-Mode MS-DOS (`WINCMD.COM`)
     let mut dvm = DosVm::new(DosEra::Dos710);
-    dvm.vfs.insert(String::from("FUZZ.BAT"), case.bat_bytes.clone());
-    dvm.vfs.insert(String::from("CHILD.COM"), case.child_com.clone());
-    dvm.vfs.insert(String::from("IN.TXT"), case.in_payload.clone());
+    dvm.vfs
+        .insert(String::from("FUZZ.BAT"), case.bat_bytes.clone());
+    dvm.vfs
+        .insert(String::from("CHILD.COM"), case.child_com.clone());
+    dvm.vfs
+        .insert(String::from("IN.TXT"), case.in_payload.clone());
     dvm.load_com(
         dos_img,
         " --dialect=nt /C FUZZ.BAT",
@@ -586,24 +595,41 @@ fn run_single_cross_isa_case(
     let wince_root = BS.to_string();
 
     // 3. IA-32 PE32 (`WINCMD32.EXE`) & 4. x86-64 PE32+ (`WINCMD64.EXE`)
-    for (lbl, img) in [(x32_lbl.as_str(), x32_img.as_slice()), (x64_lbl.as_str(), x64_img.as_slice())] {
+    for (lbl, img) in [
+        (x32_lbl.as_str(), x32_img.as_slice()),
+        (x64_lbl.as_str(), x64_img.as_slice()),
+    ] {
         let env = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         seed_pe_fuzz_vfs(&env, &nt_root, case);
         let mut vm = X86PeVm::from_pe_bytes(img, "/C FUZZ.BAT", &[], Rc::clone(&env))?;
         let r = vm.run_with_coverage(12_000_000, false)?;
-        verify_pe(lbl, collect_pe_outcome(r.exit_code, r.stdout, r.stderr, &env, &nt_root))?;
+        verify_pe(
+            lbl,
+            collect_pe_outcome(r.exit_code, r.stdout, r.stderr, &env, &nt_root),
+        )?;
     }
 
     // 5. ARMv4 WinCE PE32 (`WINCMD_ARMV4.EXE`) & 6. ARMv7 Thumb-2 PE32 (`WINCMD_ARM32.EXE`)
-    for (lbl, img, is_ce, pfx, arg) in [
-        ("fasmarm/armv4", suite.armv4_img.as_slice(), true, wince_root.as_str(), format!("/C {BS}FUZZ.BAT")),
-        (a32_lbl.as_str(), a32_img.as_slice(), false, nt_root.as_str(), String::from("/C FUZZ.BAT")),
-    ] {
-        let env = Rc::new(RefCell::new(SharedWinEnv::new(is_ce)));
-        seed_pe_fuzz_vfs(&env, pfx, case);
-        let mut vm = Arm32Vm::from_pe_bytes(img, &arg, &[], Rc::clone(&env))?;
+    if let Some(v4_img) = suite.armv4_img.as_deref() {
+        let env = Rc::new(RefCell::new(SharedWinEnv::new(true)));
+        seed_pe_fuzz_vfs(&env, &wince_root, case);
+        let mut vm =
+            Arm32Vm::from_pe_bytes(v4_img, &format!("/C {BS}FUZZ.BAT"), &[], Rc::clone(&env))?;
         let r = vm.run_with_coverage(12_000_000, false)?;
-        verify_pe(lbl, collect_pe_outcome(r.exit_code, r.stdout, r.stderr, &env, pfx))?;
+        verify_pe(
+            "fasmarm/armv4",
+            collect_pe_outcome(r.exit_code, r.stdout, r.stderr, &env, &wince_root),
+        )?;
+    }
+    {
+        let env = Rc::new(RefCell::new(SharedWinEnv::new(false)));
+        seed_pe_fuzz_vfs(&env, &nt_root, case);
+        let mut vm = Arm32Vm::from_pe_bytes(a32_img, "/C FUZZ.BAT", &[], Rc::clone(&env))?;
+        let r = vm.run_with_coverage(12_000_000, false)?;
+        verify_pe(
+            a32_lbl,
+            collect_pe_outcome(r.exit_code, r.stdout, r.stderr, &env, &nt_root),
+        )?;
     }
 
     // 7. AArch64 PE32+ (`WINCMD_ARM64.EXE`)
@@ -611,22 +637,32 @@ fn run_single_cross_isa_case(
     seed_pe_fuzz_vfs(&env, &nt_root, case);
     let mut vm = Arm64Vm::from_pe_bytes(a64_img, "/C FUZZ.BAT", &[], Rc::clone(&env))?;
     let r = vm.run_with_coverage(20_000_000, false)?;
-    verify_pe(a64_lbl, collect_pe_outcome(r.exit_code, r.stdout, r.stderr, &env, &nt_root))
+    verify_pe(
+        a64_lbl,
+        collect_pe_outcome(r.exit_code, r.stdout, r.stderr, &env, &nt_root),
+    )
 }
 
 fn probe_reference_cmd_runner() -> Option<(String, Vec<String>)> {
     if cfg!(windows) {
-        return Some((String::from("cmd.exe"), vec![String::from("/d"), String::from("/c")]));
+        return Some((
+            String::from("cmd.exe"),
+            vec![String::from("/d"), String::from("/c")],
+        ));
     }
-    let ok = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("command -v wine >/dev/null 2>&1")
-        .status()
-        .is_ok_and(|s| s.success());
+    let ok = std::process::Command::new("wine")
+        .env("WINEDEBUG", "-all")
+        .args(["cmd.exe", "/d", "/c", "ver"])
+        .output()
+        .is_ok_and(|o| o.status.success());
     if ok {
         Some((
             String::from("wine"),
-            vec![String::from("cmd.exe"), String::from("/d"), String::from("/c")],
+            vec![
+                String::from("cmd.exe"),
+                String::from("/d"),
+                String::from("/c"),
+            ],
         ))
     } else {
         None
@@ -668,7 +704,8 @@ pub fn verify_against_reference_cmd(
         let r = vm.run_with_coverage(12_000_000, false)?;
         let ours = collect_pe_outcome(r.exit_code, r.stdout, r.stderr, &env, &nt_root);
 
-        let work = std::env::temp_dir().join(format!("wincmd_refcmd_{}_{verified}", std::process::id()));
+        let work =
+            std::env::temp_dir().join(format!("wincmd_refcmd_{}_{verified}", std::process::id()));
         let _ = fs::remove_dir_all(&work);
         fs::create_dir_all(&work)?;
         fs::write(work.join("FUZZ.BAT"), &case.bat_bytes)?;
@@ -716,50 +753,49 @@ pub fn verify_against_reference_cmd(
 /// - 7-target Cross-ISA mode:
 ///   `diff-fuzz --cross-isa --seed <u64> --cases <N> --build-dir <dir>`
 ///
-/// # Errors
-///
-/// Returns [`ToolError`] on CLI errors, file I/O errors, or differential mismatches.
-pub fn run_cli<I, S, W>(args: I, out: &mut W) -> Result<(), ToolError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-    W: Write,
-{
-    let collected: Vec<String> = args.into_iter().map(|s| s.as_ref().to_owned()).collect();
-    let mut seed = 0x2026_1120_u64;
-    let mut cases = 100_usize;
-    let mut ref_cmd_cases = 0_usize;
-    let mut era = DosEra::Dos400;
-    let mut cross_isa = false;
-    let mut build_dir = PathBuf::from("build");
-    let mut paths: Vec<PathBuf> = Vec::new();
+struct CliConfig {
+    seed: u64,
+    cases: usize,
+    ref_cmd_cases: usize,
+    era: DosEra,
+    cross_isa: bool,
+    build_dir: PathBuf,
+    paths: Vec<PathBuf>,
+}
 
+fn parse_cli_args(collected: &[String]) -> Result<CliConfig, ToolError> {
+    let mut cfg = CliConfig {
+        seed: 0x2026_1120_u64,
+        cases: 100_usize,
+        ref_cmd_cases: 0_usize,
+        era: DosEra::Dos400,
+        cross_isa: false,
+        build_dir: PathBuf::from("build"),
+        paths: Vec::new(),
+    };
     let mut idx = 1_usize;
     while idx < collected.len() {
+        let next_val = |flag: &str| {
+            collected.get(idx + 1).ok_or_else(|| ToolError::CliUsage {
+                message: format!("missing value after `{flag}`"),
+            })
+        };
         match collected[idx].as_str() {
             "--cross-isa" => {
-                cross_isa = true;
+                cfg.cross_isa = true;
                 idx += 1;
             }
             "--ref-cmd" => {
-                let val = collected.get(idx + 1).ok_or_else(|| ToolError::CliUsage {
-                    message: "missing value after `--ref-cmd`".into(),
-                })?;
-                ref_cmd_cases = val.parse::<usize>()?;
+                cfg.ref_cmd_cases = next_val("--ref-cmd")?.parse::<usize>()?;
                 idx += 2;
             }
             "--build-dir" => {
-                let val = collected.get(idx + 1).ok_or_else(|| ToolError::CliUsage {
-                    message: "missing value after `--build-dir`".into(),
-                })?;
-                build_dir = PathBuf::from(val);
+                cfg.build_dir = PathBuf::from(next_val("--build-dir")?);
                 idx += 2;
             }
             "--seed" => {
-                let val = collected.get(idx + 1).ok_or_else(|| ToolError::CliUsage {
-                    message: "missing value after `--seed`".into(),
-                })?;
-                seed = if let Some(h) = val.strip_prefix("0x") {
+                let val = next_val("--seed")?;
+                cfg.seed = if let Some(h) = val.strip_prefix("0x") {
                     u64::from_str_radix(h, 16)?
                 } else {
                     val.parse::<u64>()?
@@ -767,17 +803,12 @@ where
                 idx += 2;
             }
             "--cases" => {
-                let val = collected.get(idx + 1).ok_or_else(|| ToolError::CliUsage {
-                    message: "missing value after `--cases`".into(),
-                })?;
-                cases = val.parse::<usize>()?;
+                cfg.cases = next_val("--cases")?.parse::<usize>()?;
                 idx += 2;
             }
             "--era" => {
-                let val = collected.get(idx + 1).ok_or_else(|| ToolError::CliUsage {
-                    message: "missing value after `--era`".into(),
-                })?;
-                era = DosEra::parse(val).ok_or_else(|| ToolError::CliUsage {
+                let val = next_val("--era")?;
+                cfg.era = DosEra::parse(val).ok_or_else(|| ToolError::CliUsage {
                     message: format!("unknown DOS era `{val}`"),
                 })?;
                 idx += 2;
@@ -788,28 +819,52 @@ where
                 });
             }
             pos => {
-                paths.push(PathBuf::from(pos));
+                cfg.paths.push(PathBuf::from(pos));
                 idx += 1;
             }
         }
     }
+    Ok(cfg)
+}
 
-    if cross_isa {
-        let suite = CrossIsaSuite::load_from_build_dir(&build_dir)?;
-        run_cross_isa_fuzz(seed, cases, &suite)?;
-        let ref_ran = if ref_cmd_cases > 0 { verify_against_reference_cmd(seed, ref_cmd_cases, &suite)? } else { 0 };
-        writeln!(out, "diff-fuzz: {cases} 7-target cross-ISA cases (+ {ref_ran} live cmd.exe cases) passed (seed 0x{seed:X})")?;
+/// CLI entrypoint for `diff-fuzz`.
+///
+/// # Errors
+///
+/// Returns [`ToolError`] on CLI errors, file I/O errors, or differential mismatches.
+pub fn run_cli<I, S, W>(args: I, out: &mut W) -> Result<(), ToolError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+    W: Write,
+{
+    let collected: Vec<String> = args.into_iter().map(|s| s.as_ref().to_owned()).collect();
+    let cfg = parse_cli_args(&collected)?;
+
+    if cfg.cross_isa {
+        let suite = CrossIsaSuite::load_from_build_dir(&cfg.build_dir)?;
+        run_cross_isa_fuzz(cfg.seed, cfg.cases, &suite)?;
+        let ref_ran = if cfg.ref_cmd_cases > 0 {
+            verify_against_reference_cmd(cfg.seed, cfg.ref_cmd_cases, &suite)?
+        } else {
+            0
+        };
+        writeln!(
+            out,
+            "diff-fuzz: {} 7-target cross-ISA cases (+ {ref_ran} live cmd.exe cases) passed (seed 0x{:X})",
+            cfg.cases, cfg.seed
+        )?;
         return Ok(());
     }
 
-    if paths.len() < 2 {
+    if cfg.paths.len() < 2 {
         return Err(ToolError::CliUsage {
             message: "expected at least 2 `.COM` binaries to compare".into(),
         });
     }
 
-    let mut loaded: Vec<(String, Vec<u8>)> = Vec::with_capacity(paths.len());
-    for p in &paths {
+    let mut loaded: Vec<(String, Vec<u8>)> = Vec::with_capacity(cfg.paths.len());
+    for p in &cfg.paths {
         loaded.push((p.to_string_lossy().into_owned(), fs::read(p)?));
     }
     let refs: Vec<(&str, &[u8])> = loaded
@@ -817,11 +872,13 @@ where
         .map(|(n, b)| (n.as_str(), b.as_slice()))
         .collect();
 
-    run_differential_com_fuzz(seed, cases, era, &refs)?;
+    run_differential_com_fuzz(cfg.seed, cfg.cases, cfg.era, &refs)?;
     writeln!(
         out,
-        "diff-fuzz: {cases} differential cases passed across {} binaries (seed 0x{seed:X})",
-        refs.len()
+        "diff-fuzz: {} differential cases passed across {} binaries (seed 0x{:X})",
+        cfg.cases,
+        refs.len(),
+        cfg.seed
     )?;
     Ok(())
 }
@@ -851,8 +908,13 @@ mod tests {
             &[("nasm", &ok_com), ("fasm", &ok_com), ("jwasm", &ok_com)],
         )?;
         assert!(
-            run_differential_com_fuzz(1, 5, DosEra::Dos400, &[("nasm", &ok_com), ("bad", &bad_com)])
-                .is_err()
+            run_differential_com_fuzz(
+                1,
+                5,
+                DosEra::Dos400,
+                &[("nasm", &ok_com), ("bad", &bad_com)]
+            )
+            .is_err()
         );
 
         let tmp = std::env::temp_dir().join("wincmd_diff_fuzz_cli_test");
@@ -897,7 +959,12 @@ mod tests {
         assert!(run_cli(["diff-fuzz", "--build-dir"], &mut out).is_err());
         assert!(
             run_cli(
-                ["diff-fuzz", "--cross-isa", "--build-dir", &tmp.to_string_lossy()],
+                [
+                    "diff-fuzz",
+                    "--cross-isa",
+                    "--build-dir",
+                    &tmp.to_string_lossy()
+                ],
                 &mut out
             )
             .is_err()

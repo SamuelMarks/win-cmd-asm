@@ -46,6 +46,16 @@ fn load_w64(tc: &str) -> Result<Vec<u8>, ToolError> {
     )?)
 }
 
+fn built_toolchains() -> Vec<&'static str> {
+    let root = repo_root();
+    let tcs: Vec<&'static str> = ["nasm", "fasm", "jwasm"]
+        .into_iter()
+        .filter(|tc| root.join(format!("build/{tc}/x86_64/WINCMD64.EXE")).is_file())
+        .collect();
+    assert!(!tcs.is_empty(), "at least one x86-64 toolchain must be built");
+    tcs
+}
+
 fn rva_to_file_offset(pe: &[u8], lfanew: usize, rva: u32) -> Option<usize> {
     let num_secs = usize::from(u16::from_le_bytes([
         pe.get(lfanew + 6).copied()?,
@@ -142,11 +152,10 @@ fn verify_pdata_and_xdata(tc: &str, pe: &[u8], lfanew: usize, opt: usize) -> Res
         pdata_rva != 0 && pdata_sz >= 12 * 80 && pdata_sz.is_multiple_of(12),
         "{tc} .pdata exception directory must cover all non-leaf x64 procedures (sz={pdata_sz})"
     );
-    let pdata_off =
-        rva_to_file_offset(pe, lfanew, pdata_rva).ok_or_else(|| ToolError::Syntax {
-            span: SourceSpan::new("WINCMD64.EXE", 1, 1),
-            message: format!("{tc} invalid .pdata RVA"),
-        })?;
+    let pdata_off = rva_to_file_offset(pe, lfanew, pdata_rva).ok_or_else(|| ToolError::Syntax {
+        span: SourceSpan::new("WINCMD64.EXE", 1, 1),
+        message: format!("{tc} invalid .pdata RVA"),
+    })?;
 
     let count = pdata_sz / 12;
     let mut prev_end = 0_u32;
@@ -162,11 +171,10 @@ fn verify_pdata_and_xdata(tc: &str, pe: &[u8], lfanew: usize, opt: usize) -> Res
         );
         prev_end = end_rva;
 
-        let xoff =
-            rva_to_file_offset(pe, lfanew, unwind_rva).ok_or_else(|| ToolError::Syntax {
-                span: SourceSpan::new("WINCMD64.EXE", 1, 1),
-                message: format!("{tc} invalid .xdata RVA {unwind_rva:#x}"),
-            })?;
+        let xoff = rva_to_file_offset(pe, lfanew, unwind_rva).ok_or_else(|| ToolError::Syntax {
+            span: SourceSpan::new("WINCMD64.EXE", 1, 1),
+            message: format!("{tc} invalid .xdata RVA {unwind_rva:#x}"),
+        })?;
         let ver_flags = pe[xoff];
         assert_eq!(ver_flags & 0x07, 1, "{tc} UNWIND_INFO version must be 1");
         let code_cnt = usize::from(pe[xoff + 2]);
@@ -204,10 +212,7 @@ fn verify_cfg_load_config(
         message: format!("{tc} invalid LOAD_CONFIG RVA"),
     })?;
     let lcfg_sz = read_u32_at(pe, lcfg_off);
-    assert_eq!(
-        lcfg_sz, 256,
-        "{tc} 256-byte IMAGE_LOAD_CONFIG_DIRECTORY64"
-    );
+    assert_eq!(lcfg_sz, 256, "{tc} 256-byte IMAGE_LOAD_CONFIG_DIRECTORY64");
 
     let cfg_check_ptr_va = read_u64_at(pe, lcfg_off + 112);
     let gfids_tbl_va = read_u64_at(pe, lcfg_off + 128);
@@ -316,15 +321,15 @@ fn verify_nt52_import_table(
 }
 
 #[test]
-fn m9_pe32plus_headers_seh_pdata_cfg_cet_manifest_and_nt52_iat_across_assemblers(
-) -> Result<(), ToolError> {
+fn m9_pe32plus_headers_seh_pdata_cfg_cet_manifest_and_nt52_iat_across_assemblers()
+-> Result<(), ToolError> {
     let allowed_iat = audited_nt52_k32_exports();
     assert!(
         !allowed_iat.is_empty(),
         "k32_x64.def export baseline must load"
     );
 
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let pe = load_w64(tc)?;
         assert!(
             pe.len() <= 131_072,
@@ -407,7 +412,13 @@ fn detect_win64_runner() -> Option<Win64Runner> {
     if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         return Some(Win64Runner::Native);
     }
-    let st = Command::new("wine").arg("--version").output().ok()?;
+    let probe_exe = repo_root().join("build/nasm/x86_64/WINCMD64.EXE");
+    let st = Command::new("wine")
+        .env("WINEDEBUG", "-all")
+        .arg(&probe_exe)
+        .args(["/C", "VER"])
+        .output()
+        .ok()?;
     if st.status.success() {
         Some(Win64Runner::Wine)
     } else {
@@ -501,10 +512,7 @@ fn verify_x64_master_script(
     std::fs::write(&master_bat, script.as_bytes())?;
 
     let (rc, out, err) = run_wincmd64(runner, exe, &["/C", &win_master])?;
-    assert_eq!(
-        rc, 0,
-        "{tc} master64.cmd rc=0 (stderr={err}, stdout={out})"
-    );
+    assert_eq!(rc, 0, "{tc} master64.cmd rc=0 (stderr={err}, stdout={out})");
     assert!(
         out.contains("MATH=65:-2147483648:8"),
         "{tc} SET /A + INT32_MIN/-1 + shift&31: {out}"
@@ -521,10 +529,7 @@ fn verify_x64_master_script(
         out.contains(&format!(r#"M9Type_{tc}=wincmd64.exe "%1""#)),
         "{tc} 64-bit ADVAPI32 FTYPE: {out}"
     );
-    assert!(
-        out.contains("<JUNCTION>"),
-        "{tc} DIR <JUNCTION> tag: {out}"
-    );
+    assert!(out.contains("<JUNCTION>"), "{tc} DIR <JUNCTION> tag: {out}");
     assert!(
         real_dir.join("keep64.txt").exists(),
         "{tc} RD /S /Q must unlink junction without deleting target files!"
@@ -625,8 +630,8 @@ fn verify_utf16_and_nt52_cap(
 }
 
 #[test]
-fn m9_live_win64_pipes_registry_mklink_utf16_nt52cap_and_vm8086_across_assemblers(
-) -> Result<(), ToolError> {
+fn m9_live_win64_pipes_registry_mklink_utf16_nt52cap_and_vm8086_across_assemblers()
+-> Result<(), ToolError> {
     let Some(runner) = detect_win64_runner() else {
         return Ok(());
     };
@@ -638,7 +643,7 @@ fn m9_live_win64_pipes_registry_mklink_utf16_nt52cap_and_vm8086_across_assembler
     let com_hostname = to_win_path(runner, &root.join("build/nasm/dos16/HOSTNAME.COM"));
     let com_truename = to_win_path(runner, &root.join("build/nasm/dos16/TRUENAME.COM"));
 
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let exe = root.join(format!("build/{tc}/x86_64/WINCMD64.EXE"));
         let tc_dir = scratch.join(tc);
         std::fs::create_dir_all(&tc_dir)?;

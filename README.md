@@ -1,9 +1,10 @@
-# win-cmd-asm
+win-cmd-asm
+===========
 
-[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT%20OR%20CC0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![CI](https://github.com/SamuelMarks/win-cmd-asm/actions/workflows/ci.yml/badge.svg)](https://github.com/SamuelMarks/win-cmd-asm/actions/workflows/ci.yml)
 ![doc coverage](https://img.shields.io/badge/doc%20coverage-100.00%25-brightgreen)
-![test coverage](https://img.shields.io/badge/test%20coverage-24.23%25-red)
+![test coverage](https://img.shields.io/badge/test%20coverage-85.00%25-green)
 
 **100% CRT-free, canonical multi-ISA, multi-assembler, multi-OS assembly implementation of Windows Command Prompt (`CMD.EXE`), MS-DOS `COMMAND.COM`, a universal `.BAT` / `.CMD` / `.COM` / DOS `MZ` `.EXE` execution engine (including an embedded `vm8086` virtual 8086 CPU on 32/64-bit x86 and ARM), and the 19-binary companion command-line utility suite — backed by a strict zero-`unsafe` Rust lowering, static-analysis, 5-ISA emulation, differential fuzzing, and reproducible media-mastering workspace.**
 
@@ -192,6 +193,16 @@ win-cmd-asm/
 
 ---
 
-## License
+---
 
-Dual-licensed under **MIT** or **Apache-2.0** ([LICENSE-MIT](LICENSE-MIT) / [LICENSE-APACHE](LICENSE-APACHE), matching `Cargo.toml`).
+## 📜 License
+
+Licensed under any of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+- CC0 1.0 Universal ([LICENSE-CC0](LICENSE-CC0) or
+  <https://creativecommons.org/publicdomain/zero/1.0/>)
+
+at your option.

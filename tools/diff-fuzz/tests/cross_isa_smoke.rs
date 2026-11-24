@@ -42,6 +42,11 @@ fn cross_isa_suite_and_cli_binary_smoke() -> Result<(), ToolError> {
     )?;
     assert!(String::from_utf8_lossy(&out).contains("7-target cross-ISA"));
 
+    let peer_com = if build_dir.join("fasm/dos16/WINCMD.COM").is_file() {
+        build_dir.join("fasm/dos16/WINCMD.COM")
+    } else {
+        build_dir.join("jwasm/dos16/WINCMD.COM")
+    };
     let bin = env!("CARGO_BIN_EXE_diff-fuzz");
     let ok = Command::new(bin)
         .args([
@@ -50,7 +55,7 @@ fn cross_isa_suite_and_cli_binary_smoke() -> Result<(), ToolError> {
             "--cases",
             "2",
             &build_dir.join("nasm/dos16/WINCMD.COM").to_string_lossy(),
-            &build_dir.join("fasm/dos16/WINCMD.COM").to_string_lossy(),
+            &peer_com.to_string_lossy(),
         ])
         .output()?;
     assert!(ok.status.success());

@@ -148,44 +148,20 @@ pub fn build_iso9660(
     volume_id: &str,
     entries: &[(&str, &[u8])],
 ) -> Result<Vec<u8>, ToolError> {
-    let mut grouped: BTreeMap<String, Vec<(String, &[u8])>> = BTreeMap::new();
-    grouped.insert(String::new(), Vec::new());
-    for &(rel, data) in entries {
-        let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
-        match parts.as_slice() {
-            [fname] => grouped
-                .entry(String::new())
-                .or_default()
-                .push((fname.to_ascii_uppercase(), data)),
-            [dname, fname] => grouped
-                .entry(dname.to_ascii_uppercase())
-                .or_default()
-                .push((fname.to_ascii_uppercase(), data)),
-            _ => {
-                return Err(ToolError::MediaPackage {
-                    artifact: artifact.to_owned(),
-                    details: format!("unsupported ISO path depth `{rel}`"),
-                });
-            }
-        }
-    }
-
-    let mut dirs = Vec::with_capacity(grouped.len());
-    for (name, mut files) in grouped {
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        dirs.push(DirNode { name, files });
-    }
+    let dirs = group_iso_entries(artifact, entries)?;
 
     // Layout LBAs: 0..16 system, 16 PVD, 17 VDST, 18 L-Path, 19 M-Path, 20.. dirs, then file extents
-    let dir_start_lba = 20u32;
-    let mut cur_lba = dir_start_lba;
-    // Estimate directory sector counts (2 sectors max per directory is plenty for <= 30 files)
+    let mut cur_lba = 20u32;
     let mut dir_lbas = Vec::with_capacity(dirs.len());
     let mut dir_sec_counts = Vec::with_capacity(dirs.len());
     for d in &dirs {
         dir_lbas.push(cur_lba);
-        let est_secs = u32::try_from(((d.files.len() + dirs.len() + 4) * 64).div_ceil(ISO_SECTOR).max(1))
-            .unwrap_or(1);
+        let est_secs = u32::try_from(
+            ((d.files.len() + dirs.len() + 4) * 64)
+                .div_ceil(ISO_SECTOR)
+                .max(1),
+        )
+        .unwrap_or(1);
         dir_sec_counts.push(est_secs);
         cur_lba += est_secs;
     }
@@ -201,32 +177,7 @@ pub fn build_iso9660(
         file_lbas.push(fl);
     }
     let total_lbas = cur_lba;
-
-    let mut dir_blobs = Vec::with_capacity(dirs.len());
-    for (d_idx, d) in dirs.iter().enumerate() {
-        let own_lba = dir_lbas[d_idx];
-        let own_len = dir_sec_counts[d_idx] * u32::try_from(ISO_SECTOR).unwrap_or(2048);
-        let parent_lba = dir_lbas[0];
-        let parent_len = dir_sec_counts[0] * u32::try_from(ISO_SECTOR).unwrap_or(2048);
-        let mut buf = Vec::new();
-        append_dir_record(&mut buf, &[0x00], own_lba, own_len, true);
-        append_dir_record(&mut buf, &[0x01], parent_lba, parent_len, true);
-        if d_idx == 0 {
-            for (sub_i, sub_d) in dirs.iter().enumerate().skip(1) {
-                let s_len = dir_sec_counts[sub_i] * u32::try_from(ISO_SECTOR).unwrap_or(2048);
-                append_dir_record(&mut buf, sub_d.name.as_bytes(), dir_lbas[sub_i], s_len, true);
-            }
-        }
-        for (f_i, (fname, fbytes)) in d.files.iter().enumerate() {
-            let iso_id = format!("{fname};1");
-            let flen = u32::try_from(fbytes.len()).unwrap_or(u32::MAX);
-            append_dir_record(&mut buf, iso_id.as_bytes(), file_lbas[d_idx][f_i], flen, false);
-        }
-        pad_to_sector(&mut buf);
-        let target_bytes = usize::try_from(own_len).unwrap_or(ISO_SECTOR);
-        buf.resize(target_bytes, 0);
-        dir_blobs.push(buf);
-    }
+    let dir_blobs = encode_iso_dir_blobs(&dirs, &dir_lbas, &dir_sec_counts, &file_lbas);
 
     let (l_tbl, m_tbl) = build_path_tables(&dirs, &dir_lbas);
     let path_tbl_len = u32::try_from(l_tbl.len()).unwrap_or(0);
@@ -255,6 +206,85 @@ pub fn build_iso9660(
         }
     }
     Ok(iso)
+}
+
+fn group_iso_entries<'a>(
+    artifact: &str,
+    entries: &[(&str, &'a [u8])],
+) -> Result<Vec<DirNode<'a>>, ToolError> {
+    let mut grouped: BTreeMap<String, Vec<(String, &'a [u8])>> = BTreeMap::new();
+    grouped.insert(String::new(), Vec::new());
+    for &(rel, data) in entries {
+        let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+        match parts.as_slice() {
+            [fname] => grouped
+                .entry(String::new())
+                .or_default()
+                .push((fname.to_ascii_uppercase(), data)),
+            [dname, fname] => grouped
+                .entry(dname.to_ascii_uppercase())
+                .or_default()
+                .push((fname.to_ascii_uppercase(), data)),
+            _ => {
+                return Err(ToolError::MediaPackage {
+                    artifact: artifact.to_owned(),
+                    details: format!("unsupported ISO path depth `{rel}`"),
+                });
+            }
+        }
+    }
+    let mut dirs = Vec::with_capacity(grouped.len());
+    for (name, mut files) in grouped {
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        dirs.push(DirNode { name, files });
+    }
+    Ok(dirs)
+}
+
+fn encode_iso_dir_blobs(
+    dirs: &[DirNode<'_>],
+    dir_lbas: &[u32],
+    dir_sec_counts: &[u32],
+    file_lbas: &[Vec<u32>],
+) -> Vec<Vec<u8>> {
+    let mut dir_blobs = Vec::with_capacity(dirs.len());
+    for (d_idx, d) in dirs.iter().enumerate() {
+        let own_lba = dir_lbas[d_idx];
+        let own_len = dir_sec_counts[d_idx] * u32::try_from(ISO_SECTOR).unwrap_or(2048);
+        let parent_lba = dir_lbas[0];
+        let parent_len = dir_sec_counts[0] * u32::try_from(ISO_SECTOR).unwrap_or(2048);
+        let mut buf = Vec::new();
+        append_dir_record(&mut buf, &[0x00], own_lba, own_len, true);
+        append_dir_record(&mut buf, &[0x01], parent_lba, parent_len, true);
+        if d_idx == 0 {
+            for (sub_i, sub_d) in dirs.iter().enumerate().skip(1) {
+                let s_len = dir_sec_counts[sub_i] * u32::try_from(ISO_SECTOR).unwrap_or(2048);
+                append_dir_record(
+                    &mut buf,
+                    sub_d.name.as_bytes(),
+                    dir_lbas[sub_i],
+                    s_len,
+                    true,
+                );
+            }
+        }
+        for (f_i, (fname, fbytes)) in d.files.iter().enumerate() {
+            let iso_id = format!("{fname};1");
+            let flen = u32::try_from(fbytes.len()).unwrap_or(u32::MAX);
+            append_dir_record(
+                &mut buf,
+                iso_id.as_bytes(),
+                file_lbas[d_idx][f_i],
+                flen,
+                false,
+            );
+        }
+        pad_to_sector(&mut buf);
+        let target_bytes = usize::try_from(own_len).unwrap_or(ISO_SECTOR);
+        buf.resize(target_bytes, 0);
+        dir_blobs.push(buf);
+    }
+    dir_blobs
 }
 
 fn parse_iso_dir(iso: &[u8], lba: usize, byte_len: usize) -> Vec<(String, usize, usize, bool)> {

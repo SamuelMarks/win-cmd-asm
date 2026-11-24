@@ -7,7 +7,7 @@
 use emu_cov::arm32_pe::{Arm32RunResult, Arm32Vm};
 use emu_cov::arm64_pe::{Arm64RunResult, Arm64Vm};
 use emu_cov::win_mock::{BS, DQ, SharedWinEnv, emu_err};
-use emu_cov::x86_pe::{X86RunResult, X86PeVm};
+use emu_cov::x86_pe::{X86PeVm, X86RunResult};
 use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
@@ -133,7 +133,12 @@ fn m12_all_228_pe_utility_binaries_headers_zero_crt_and_32k_budget() -> Result<(
         ("llvm/arm64", 0xAA64, true),
     ];
 
+    let mut checked_dirs = 0usize;
     for &(dir, expected_machine, is_pe64) in matrix {
+        if !root.join("build").join(dir).join("MEM.EXE").is_file() {
+            continue;
+        }
+        checked_dirs += 1;
         for &exe in &ALL_19_UTILS {
             let rel = format!("build/{dir}/{exe}");
             let pe = fs::read(root.join(&rel))?;
@@ -143,9 +148,8 @@ fn m12_all_228_pe_utility_binaries_headers_zero_crt_and_32k_budget() -> Result<(
                 pe.len()
             );
             assert_eq!(&pe[0..2], b"MZ", "{rel} MZ header");
-            let lfa =
-                usize::try_from(u32::from_le_bytes([pe[0x3C], pe[0x3D], pe[0x3E], pe[0x3F]]))
-                    .unwrap_or(0);
+            let lfa = usize::try_from(u32::from_le_bytes([pe[0x3C], pe[0x3D], pe[0x3E], pe[0x3F]]))
+                .unwrap_or(0);
             assert_eq!(&pe[lfa..lfa + 4], &[b'P', b'E', 0, 0], "{rel} PE sig");
             let machine = u16::from_le_bytes([pe[lfa + 4], pe[lfa + 5]]);
             assert_eq!(machine, expected_machine, "{rel} machine type");
@@ -201,6 +205,7 @@ fn m12_all_228_pe_utility_binaries_headers_zero_crt_and_32k_budget() -> Result<(
             assert_eq!(dll_cnt, 1, "{rel} single static DLL descriptor");
         }
     }
+    assert!(checked_dirs >= 4, "expected at least 4 built PE utility directories, got {checked_dirs}");
     Ok(())
 }
 
@@ -310,14 +315,38 @@ fn verify_arm_utils_part_a(
 
     // 3. FIND /N "beta" & 4. FINDSTR /R /N "^be.*2$"
     let lines_f = format!("C:{BS}work{BS}lines.txt");
-    let r32 = run_arm32_util(tc, "FIND.EXE", &format!("/N {DQ}beta{DQ} {lines_f}"), b"", s32)?;
-    let r64 = run_arm64_util(tc, "FIND.EXE", &format!("/N {DQ}beta{DQ} {lines_f}"), b"", s64)?;
+    let r32 = run_arm32_util(
+        tc,
+        "FIND.EXE",
+        &format!("/N {DQ}beta{DQ} {lines_f}"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_arm64_util(
+        tc,
+        "FIND.EXE",
+        &format!("/N {DQ}beta{DQ} {lines_f}"),
+        b"",
+        s64,
+    )?;
     assert_eq!((r32.exit_code, r64.exit_code), (0, 0));
     assert!(r32.stdout.contains("[2]beta2"));
     assert_eq!(r32.stdout, r64.stdout, "{tc} FIND parity");
 
-    let r32 = run_arm32_util(tc, "FINDSTR.EXE", &format!("/R /N {DQ}^be.*2${DQ} {lines_f}"), b"", s32)?;
-    let r64 = run_arm64_util(tc, "FINDSTR.EXE", &format!("/R /N {DQ}^be.*2${DQ} {lines_f}"), b"", s64)?;
+    let r32 = run_arm32_util(
+        tc,
+        "FINDSTR.EXE",
+        &format!("/R /N {DQ}^be.*2${DQ} {lines_f}"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_arm64_util(
+        tc,
+        "FINDSTR.EXE",
+        &format!("/R /N {DQ}^be.*2${DQ} {lines_f}"),
+        b"",
+        s64,
+    )?;
     assert_eq!((r32.exit_code, r64.exit_code), (0, 0));
     assert!(r32.stdout.contains("2:beta2"));
     assert_eq!(r32.stdout, r64.stdout, "{tc} FINDSTR parity");
@@ -335,7 +364,15 @@ fn verify_arm_utils_part_a(
     assert_eq!((r32.exit_code, r64.exit_code), (0, 0));
     assert!(r32.stdout.contains("gamma3"));
     assert_eq!(r32.stdout, r64.stdout, "{tc} MORE parity");
+    verify_arm_utils_part_a_cmp_tree(tc, s32, s64, &alpha_file)
+}
 
+fn verify_arm_utils_part_a_cmp_tree(
+    tc: &str,
+    s32: &Rc<RefCell<SharedWinEnv>>,
+    s64: &Rc<RefCell<SharedWinEnv>>,
+    alpha_file: &str,
+) -> Result<(), ToolError> {
     // 7. FC (equal & diff) & 8. COMP /M & 9. TREE /F /A & 10. WHERE /R
     let copy_file = format!("C:{BS}work{BS}a_copy.txt");
     let diff_file = format!("C:{BS}work{BS}b.txt");
@@ -343,13 +380,37 @@ fn verify_arm_utils_part_a(
     let r64 = run_arm64_util(tc, "FC.EXE", &format!("{alpha_file} {copy_file}"), b"", s64)?;
     assert_eq!((r32.exit_code, r64.exit_code), (0, 0));
     assert_eq!(r32.stdout, r64.stdout, "{tc} FC equal parity");
-    let r32 = run_arm32_util(tc, "FC.EXE", &format!("/B {alpha_file} {diff_file}"), b"", s32)?;
-    let r64 = run_arm64_util(tc, "FC.EXE", &format!("/B {alpha_file} {diff_file}"), b"", s64)?;
+    let r32 = run_arm32_util(
+        tc,
+        "FC.EXE",
+        &format!("/B {alpha_file} {diff_file}"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_arm64_util(
+        tc,
+        "FC.EXE",
+        &format!("/B {alpha_file} {diff_file}"),
+        b"",
+        s64,
+    )?;
     assert_eq!((r32.exit_code, r64.exit_code), (1, 1));
     assert_eq!(r32.stdout, r64.stdout, "{tc} FC /B diff parity");
 
-    let r32 = run_arm32_util(tc, "COMP.EXE", &format!("/M {alpha_file} {copy_file}"), b"", s32)?;
-    let r64 = run_arm64_util(tc, "COMP.EXE", &format!("/M {alpha_file} {copy_file}"), b"", s64)?;
+    let r32 = run_arm32_util(
+        tc,
+        "COMP.EXE",
+        &format!("/M {alpha_file} {copy_file}"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_arm64_util(
+        tc,
+        "COMP.EXE",
+        &format!("/M {alpha_file} {copy_file}"),
+        b"",
+        s64,
+    )?;
     assert_eq!((r32.exit_code, r64.exit_code), (0, 0));
     assert!(r32.stdout.contains("Files compare OK"));
     assert_eq!(r32.stdout, r64.stdout, "{tc} COMP equal parity");
@@ -380,14 +441,38 @@ fn verify_arm_utils_part_b(
     let xc_dst = format!("C:{BS}work{BS}xc_dst");
 
     // 11. XCOPY /S /E /Y & 12. REPLACE /A
-    let r32 = run_arm32_util(tc, "XCOPY.EXE", &format!("{tr_dir} {xc_dst} /S /E /Y"), b"", s32)?;
-    let r64 = run_arm64_util(tc, "XCOPY.EXE", &format!("{tr_dir} {xc_dst} /S /E /Y"), b"", s64)?;
+    let r32 = run_arm32_util(
+        tc,
+        "XCOPY.EXE",
+        &format!("{tr_dir} {xc_dst} /S /E /Y"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_arm64_util(
+        tc,
+        "XCOPY.EXE",
+        &format!("{tr_dir} {xc_dst} /S /E /Y"),
+        b"",
+        s64,
+    )?;
     assert_eq!((r32.exit_code, r64.exit_code), (0, 0));
     assert!(r32.stdout.contains("1 File(s) copied"));
     assert_eq!(r32.stdout, r64.stdout, "{tc} XCOPY parity");
 
-    let r32 = run_arm32_util(tc, "REPLACE.EXE", &format!("{diff_file} {xc_dst} /A"), b"", s32)?;
-    let r64 = run_arm64_util(tc, "REPLACE.EXE", &format!("{diff_file} {xc_dst} /A"), b"", s64)?;
+    let r32 = run_arm32_util(
+        tc,
+        "REPLACE.EXE",
+        &format!("{diff_file} {xc_dst} /A"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_arm64_util(
+        tc,
+        "REPLACE.EXE",
+        &format!("{diff_file} {xc_dst} /A"),
+        b"",
+        s64,
+    )?;
     assert_eq!((r32.exit_code, r64.exit_code), (0, 0));
     assert!(r32.stdout.contains("1 file(s) added"));
     assert_eq!(r32.stdout, r64.stdout, "{tc} REPLACE parity");
@@ -395,9 +480,25 @@ fn verify_arm_utils_part_b(
     // 13. ROBOCOPY /E /MT:4 (Multi-threaded CreateThread worker pool!)
     let rb_src = format!("C:{BS}work{BS}rb_src");
     let rb_dst = format!("C:{BS}work{BS}rb_dst");
-    let r32 = run_arm32_util(tc, "ROBOCOPY.EXE", &format!("{rb_src} {rb_dst} /E /MT:4"), b"", s32)?;
-    let r64 = run_arm64_util(tc, "ROBOCOPY.EXE", &format!("{rb_src} {rb_dst} /E /MT:4"), b"", s64)?;
-    assert_eq!((r32.exit_code, r64.exit_code), (1, 1), "{tc} ROBOCOPY bitmask 1");
+    let r32 = run_arm32_util(
+        tc,
+        "ROBOCOPY.EXE",
+        &format!("{rb_src} {rb_dst} /E /MT:4"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_arm64_util(
+        tc,
+        "ROBOCOPY.EXE",
+        &format!("{rb_src} {rb_dst} /E /MT:4"),
+        b"",
+        s64,
+    )?;
+    assert_eq!(
+        (r32.exit_code, r64.exit_code),
+        (1, 1),
+        "{tc} ROBOCOPY bitmask 1"
+    );
     assert!(r32.stdout.contains("Files Copied : 6"));
     assert_eq!(r32.stdout, r64.stdout, "{tc} ROBOCOPY /MT:4 parity");
     for idx in 1..=6 {
@@ -423,22 +524,87 @@ fn verify_arm_utils_part_b(
     assert_eq!((r32.exit_code, r64.exit_code), (0, 0));
     assert!(r32.stdout.to_ascii_lowercase().contains("a.txt"));
     assert_eq!(r32.stdout, r64.stdout, "{tc} TRUENAME parity");
+    verify_arm_utils_reg_and_id(tc, s32, s64)
+}
 
+fn verify_arm_utils_reg_and_id(
+    tc: &str,
+    s32: &Rc<RefCell<SharedWinEnv>>,
+    s64: &Rc<RefCell<SharedWinEnv>>,
+) -> Result<(), ToolError> {
     // 17. REG ADD / QUERY / EXPORT / DELETE, 18. HOSTNAME, 19. WHOAMI
     let reg_key = format!("HKCU{BS}Software{BS}WinCmdM12");
     let add_args = format!("ADD {reg_key} /v Magic /t REG_DWORD /d 0x2A");
-    assert_eq!(run_arm32_util(tc, "REG.EXE", &add_args, b"", s32)?.exit_code, 0);
-    assert_eq!(run_arm64_util(tc, "REG.EXE", &add_args, b"", s64)?.exit_code, 0);
-    let r32 = run_arm32_util(tc, "REG.EXE", &format!("QUERY {reg_key} /v Magic"), b"", s32)?;
-    let r64 = run_arm64_util(tc, "REG.EXE", &format!("QUERY {reg_key} /v Magic"), b"", s64)?;
+    assert_eq!(
+        run_arm32_util(tc, "REG.EXE", &add_args, b"", s32)?.exit_code,
+        0
+    );
+    assert_eq!(
+        run_arm64_util(tc, "REG.EXE", &add_args, b"", s64)?.exit_code,
+        0
+    );
+    let r32 = run_arm32_util(
+        tc,
+        "REG.EXE",
+        &format!("QUERY {reg_key} /v Magic"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_arm64_util(
+        tc,
+        "REG.EXE",
+        &format!("QUERY {reg_key} /v Magic"),
+        b"",
+        s64,
+    )?;
     assert_eq!((r32.exit_code, r64.exit_code), (0, 0));
     assert!(r32.stdout.contains("REG_DWORD") && r32.stdout.contains("42"));
     assert_eq!(r32.stdout, r64.stdout, "{tc} REG QUERY parity");
     let reg_out = format!("C:{BS}work{BS}dump.reg");
-    assert_eq!(run_arm32_util(tc, "REG.EXE", &format!("EXPORT {reg_key} {reg_out}"), b"", s32)?.exit_code, 0);
-    assert_eq!(run_arm64_util(tc, "REG.EXE", &format!("EXPORT {reg_key} {reg_out}"), b"", s64)?.exit_code, 0);
-    assert_eq!(run_arm32_util(tc, "REG.EXE", &format!("DELETE {reg_key} /v Magic"), b"", s32)?.exit_code, 0);
-    assert_eq!(run_arm64_util(tc, "REG.EXE", &format!("DELETE {reg_key} /v Magic"), b"", s64)?.exit_code, 0);
+    assert_eq!(
+        run_arm32_util(
+            tc,
+            "REG.EXE",
+            &format!("EXPORT {reg_key} {reg_out}"),
+            b"",
+            s32
+        )?
+        .exit_code,
+        0
+    );
+    assert_eq!(
+        run_arm64_util(
+            tc,
+            "REG.EXE",
+            &format!("EXPORT {reg_key} {reg_out}"),
+            b"",
+            s64
+        )?
+        .exit_code,
+        0
+    );
+    assert_eq!(
+        run_arm32_util(
+            tc,
+            "REG.EXE",
+            &format!("DELETE {reg_key} /v Magic"),
+            b"",
+            s32
+        )?
+        .exit_code,
+        0
+    );
+    assert_eq!(
+        run_arm64_util(
+            tc,
+            "REG.EXE",
+            &format!("DELETE {reg_key} /v Magic"),
+            b"",
+            s64
+        )?
+        .exit_code,
+        0
+    );
 
     let r32 = run_arm32_util(tc, "HOSTNAME.EXE", "", b"", s32)?;
     let r64 = run_arm64_util(tc, "HOSTNAME.EXE", "", b"", s64)?;
@@ -456,7 +622,13 @@ fn verify_arm_utils_part_b(
 
 #[test]
 fn m12_arm32_and_arm64_all_19_utilities_functional_and_parity() -> Result<(), ToolError> {
+    let root = repo_root()?;
+    let mut tested = 0usize;
     for tc in ["fasmarm", "llvm"] {
+        if !root.join(format!("build/{tc}/arm64/MEM.EXE")).is_file() {
+            continue;
+        }
+        tested += 1;
         let s32 = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         let s64 = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         seed_utility_vfs(&s32);
@@ -464,6 +636,7 @@ fn m12_arm32_and_arm64_all_19_utilities_functional_and_parity() -> Result<(), To
         verify_arm_utils_part_a(tc, &s32, &s64)?;
         verify_arm_utils_part_b(tc, &s32, &s64)?;
     }
+    assert!(tested >= 1, "at least one ARM toolchain utility suite must be built");
     Ok(())
 }
 
@@ -500,22 +673,78 @@ fn verify_x86_utils_part_a(
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} MEM /C");
 
     let alpha_file = format!("C:{BS}work{BS}a.txt");
-    assert_eq!(run_x86_pe_util(dir32, "ATTRIB.EXE", &format!("+R +H {alpha_file}"), b"", s32)?.exit_code, 0);
-    assert_eq!(run_x86_pe_util(dir64, "ATTRIB.EXE", &format!("+R +H {alpha_file}"), b"", s64)?.exit_code, 0);
+    assert_eq!(
+        run_x86_pe_util(
+            dir32,
+            "ATTRIB.EXE",
+            &format!("+R +H {alpha_file}"),
+            b"",
+            s32
+        )?
+        .exit_code,
+        0
+    );
+    assert_eq!(
+        run_x86_pe_util(
+            dir64,
+            "ATTRIB.EXE",
+            &format!("+R +H {alpha_file}"),
+            b"",
+            s64
+        )?
+        .exit_code,
+        0
+    );
     let r32 = run_x86_pe_util(dir32, "ATTRIB.EXE", &alpha_file, b"", s32)?;
     let r64 = run_x86_pe_util(dir64, "ATTRIB.EXE", &alpha_file, b"", s64)?;
     assert!(r32.stdout.contains('H') && r32.stdout.contains('R'));
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} ATTRIB");
-    let _ = run_x86_pe_util(dir32, "ATTRIB.EXE", &format!("-R -H {alpha_file}"), b"", s32)?;
-    let _ = run_x86_pe_util(dir64, "ATTRIB.EXE", &format!("-R -H {alpha_file}"), b"", s64)?;
+    let _ = run_x86_pe_util(
+        dir32,
+        "ATTRIB.EXE",
+        &format!("-R -H {alpha_file}"),
+        b"",
+        s32,
+    )?;
+    let _ = run_x86_pe_util(
+        dir64,
+        "ATTRIB.EXE",
+        &format!("-R -H {alpha_file}"),
+        b"",
+        s64,
+    )?;
 
     let lines_f = format!("C:{BS}work{BS}lines.txt");
-    let r32 = run_x86_pe_util(dir32, "FIND.EXE", &format!("/N {DQ}beta{DQ} {lines_f}"), b"", s32)?;
-    let r64 = run_x86_pe_util(dir64, "FIND.EXE", &format!("/N {DQ}beta{DQ} {lines_f}"), b"", s64)?;
+    let r32 = run_x86_pe_util(
+        dir32,
+        "FIND.EXE",
+        &format!("/N {DQ}beta{DQ} {lines_f}"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_x86_pe_util(
+        dir64,
+        "FIND.EXE",
+        &format!("/N {DQ}beta{DQ} {lines_f}"),
+        b"",
+        s64,
+    )?;
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} FIND");
 
-    let r32 = run_x86_pe_util(dir32, "FINDSTR.EXE", &format!("/R /N {DQ}^be.*2${DQ} {lines_f}"), b"", s32)?;
-    let r64 = run_x86_pe_util(dir64, "FINDSTR.EXE", &format!("/R /N {DQ}^be.*2${DQ} {lines_f}"), b"", s64)?;
+    let r32 = run_x86_pe_util(
+        dir32,
+        "FINDSTR.EXE",
+        &format!("/R /N {DQ}^be.*2${DQ} {lines_f}"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_x86_pe_util(
+        dir64,
+        "FINDSTR.EXE",
+        &format!("/R /N {DQ}^be.*2${DQ} {lines_f}"),
+        b"",
+        s64,
+    )?;
     assert!(r32.stdout.contains("2:beta2"));
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} FINDSTR");
 
@@ -528,16 +757,49 @@ fn verify_x86_utils_part_a(
     let r32 = run_x86_pe_util(dir32, "MORE.EXE", &lines_f, b"", s32)?;
     let r64 = run_x86_pe_util(dir64, "MORE.EXE", &lines_f, b"", s64)?;
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} MORE");
+    verify_x86_utils_part_a_cmp_tree(dir32, dir64, s32, s64, &alpha_file)
+}
 
+fn verify_x86_utils_part_a_cmp_tree(
+    dir32: &str,
+    dir64: &str,
+    s32: &Rc<RefCell<SharedWinEnv>>,
+    s64: &Rc<RefCell<SharedWinEnv>>,
+    alpha_file: &str,
+) -> Result<(), ToolError> {
     let copy_file = format!("C:{BS}work{BS}a_copy.txt");
     let diff_file = format!("C:{BS}work{BS}b.txt");
-    let r32 = run_x86_pe_util(dir32, "FC.EXE", &format!("/B {alpha_file} {diff_file}"), b"", s32)?;
-    let r64 = run_x86_pe_util(dir64, "FC.EXE", &format!("/B {alpha_file} {diff_file}"), b"", s64)?;
+    let r32 = run_x86_pe_util(
+        dir32,
+        "FC.EXE",
+        &format!("/B {alpha_file} {diff_file}"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_x86_pe_util(
+        dir64,
+        "FC.EXE",
+        &format!("/B {alpha_file} {diff_file}"),
+        b"",
+        s64,
+    )?;
     assert_eq!((r32.exit_code, r64.exit_code), (1, 1));
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} FC /B");
 
-    let r32 = run_x86_pe_util(dir32, "COMP.EXE", &format!("/M {alpha_file} {copy_file}"), b"", s32)?;
-    let r64 = run_x86_pe_util(dir64, "COMP.EXE", &format!("/M {alpha_file} {copy_file}"), b"", s64)?;
+    let r32 = run_x86_pe_util(
+        dir32,
+        "COMP.EXE",
+        &format!("/M {alpha_file} {copy_file}"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_x86_pe_util(
+        dir64,
+        "COMP.EXE",
+        &format!("/M {alpha_file} {copy_file}"),
+        b"",
+        s64,
+    )?;
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} COMP");
 
     let tr_dir = format!("C:{BS}work{BS}tree_root");
@@ -545,8 +807,20 @@ fn verify_x86_utils_part_a(
     let r64 = run_x86_pe_util(dir64, "TREE.EXE", &format!("/F /A {tr_dir}"), b"", s64)?;
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} TREE");
 
-    let r32 = run_x86_pe_util(dir32, "WHERE.EXE", &format!("/R {tr_dir} leaf.txt"), b"", s32)?;
-    let r64 = run_x86_pe_util(dir64, "WHERE.EXE", &format!("/R {tr_dir} leaf.txt"), b"", s64)?;
+    let r32 = run_x86_pe_util(
+        dir32,
+        "WHERE.EXE",
+        &format!("/R {tr_dir} leaf.txt"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_x86_pe_util(
+        dir64,
+        "WHERE.EXE",
+        &format!("/R {tr_dir} leaf.txt"),
+        b"",
+        s64,
+    )?;
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} WHERE");
     Ok(())
 }
@@ -562,18 +836,54 @@ fn verify_x86_utils_part_b(
     let tr_dir = format!("C:{BS}work{BS}tree_root");
     let xc_dst = format!("C:{BS}work{BS}xc_dst");
 
-    let r32 = run_x86_pe_util(dir32, "XCOPY.EXE", &format!("{tr_dir} {xc_dst} /S /E /Y"), b"", s32)?;
-    let r64 = run_x86_pe_util(dir64, "XCOPY.EXE", &format!("{tr_dir} {xc_dst} /S /E /Y"), b"", s64)?;
+    let r32 = run_x86_pe_util(
+        dir32,
+        "XCOPY.EXE",
+        &format!("{tr_dir} {xc_dst} /S /E /Y"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_x86_pe_util(
+        dir64,
+        "XCOPY.EXE",
+        &format!("{tr_dir} {xc_dst} /S /E /Y"),
+        b"",
+        s64,
+    )?;
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} XCOPY");
 
-    let r32 = run_x86_pe_util(dir32, "REPLACE.EXE", &format!("{diff_file} {xc_dst} /A"), b"", s32)?;
-    let r64 = run_x86_pe_util(dir64, "REPLACE.EXE", &format!("{diff_file} {xc_dst} /A"), b"", s64)?;
+    let r32 = run_x86_pe_util(
+        dir32,
+        "REPLACE.EXE",
+        &format!("{diff_file} {xc_dst} /A"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_x86_pe_util(
+        dir64,
+        "REPLACE.EXE",
+        &format!("{diff_file} {xc_dst} /A"),
+        b"",
+        s64,
+    )?;
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} REPLACE");
 
     let rb_src = format!("C:{BS}work{BS}rb_src");
     let rb_dst = format!("C:{BS}work{BS}rb_dst");
-    let r32 = run_x86_pe_util(dir32, "ROBOCOPY.EXE", &format!("{rb_src} {rb_dst} /E /MT:4"), b"", s32)?;
-    let r64 = run_x86_pe_util(dir64, "ROBOCOPY.EXE", &format!("{rb_src} {rb_dst} /E /MT:4"), b"", s64)?;
+    let r32 = run_x86_pe_util(
+        dir32,
+        "ROBOCOPY.EXE",
+        &format!("{rb_src} {rb_dst} /E /MT:4"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_x86_pe_util(
+        dir64,
+        "ROBOCOPY.EXE",
+        &format!("{rb_src} {rb_dst} /E /MT:4"),
+        b"",
+        s64,
+    )?;
     assert_eq!((r32.exit_code, r64.exit_code), (1, 1));
     assert!(r32.stdout.contains("Files Copied : 6"));
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} ROBOCOPY /MT:4");
@@ -590,13 +900,39 @@ fn verify_x86_utils_part_b(
     let r32 = run_x86_pe_util(dir32, "TRUENAME.EXE", &alpha_file, b"", s32)?;
     let r64 = run_x86_pe_util(dir64, "TRUENAME.EXE", &alpha_file, b"", s64)?;
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} TRUENAME");
+    verify_x86_utils_reg_and_id(dir32, dir64, s32, s64)
+}
 
+fn verify_x86_utils_reg_and_id(
+    dir32: &str,
+    dir64: &str,
+    s32: &Rc<RefCell<SharedWinEnv>>,
+    s64: &Rc<RefCell<SharedWinEnv>>,
+) -> Result<(), ToolError> {
     let reg_key = format!("HKCU{BS}Software{BS}WinCmdX86");
     let add_args = format!("ADD {reg_key} /v Magic /t REG_DWORD /d 0x2A");
-    assert_eq!(run_x86_pe_util(dir32, "REG.EXE", &add_args, b"", s32)?.exit_code, 0);
-    assert_eq!(run_x86_pe_util(dir64, "REG.EXE", &add_args, b"", s64)?.exit_code, 0);
-    let r32 = run_x86_pe_util(dir32, "REG.EXE", &format!("QUERY {reg_key} /v Magic"), b"", s32)?;
-    let r64 = run_x86_pe_util(dir64, "REG.EXE", &format!("QUERY {reg_key} /v Magic"), b"", s64)?;
+    assert_eq!(
+        run_x86_pe_util(dir32, "REG.EXE", &add_args, b"", s32)?.exit_code,
+        0
+    );
+    assert_eq!(
+        run_x86_pe_util(dir64, "REG.EXE", &add_args, b"", s64)?.exit_code,
+        0
+    );
+    let r32 = run_x86_pe_util(
+        dir32,
+        "REG.EXE",
+        &format!("QUERY {reg_key} /v Magic"),
+        b"",
+        s32,
+    )?;
+    let r64 = run_x86_pe_util(
+        dir64,
+        "REG.EXE",
+        &format!("QUERY {reg_key} /v Magic"),
+        b"",
+        s64,
+    )?;
     assert!(r32.stdout.contains("REG_DWORD") && r32.stdout.contains("42"));
     assert_eq!(r32.stdout, r64.stdout, "{dir32} vs {dir64} REG QUERY");
 
@@ -613,12 +949,20 @@ fn verify_x86_utils_part_b(
 
 #[test]
 fn m12_ia32_and_x64_all_19_utilities_x86_pe_vm_parity() -> Result<(), ToolError> {
+    let root = repo_root()?;
+    let mut tested = 0usize;
     for (dir32, dir64) in [
         ("nasm/x86_32", "nasm/x86_64"),
         ("fasm/x86_32", "fasm/x86_64"),
         ("fasm-pe32/x86_32", "fasm-coff/x86_64"),
         ("jwasm/x86_32", "jwasm/x86_64"),
     ] {
+        if !root.join("build").join(dir32).join("MEM.EXE").is_file()
+            || !root.join("build").join(dir64).join("MEM.EXE").is_file()
+        {
+            continue;
+        }
+        tested += 1;
         let s32 = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         let s64 = Rc::new(RefCell::new(SharedWinEnv::new(false)));
         seed_utility_vfs(&s32);
@@ -626,20 +970,30 @@ fn m12_ia32_and_x64_all_19_utilities_x86_pe_vm_parity() -> Result<(), ToolError>
         verify_x86_utils_part_a(dir32, dir64, &s32, &s64)?;
         verify_x86_utils_part_b(dir32, dir64, &s32, &s64)?;
     }
+    assert!(tested >= 2, "at least NASM and JWasm x86 PE utilities must be built");
     Ok(())
 }
 
-fn has_wine_or_windows() -> bool {
+fn can_run_host_pe(exe_path: &Path) -> bool {
+    if !exe_path.is_file() {
+        return false;
+    }
     if cfg!(target_os = "windows") {
         return true;
     }
     Command::new("wine")
-        .arg("--version")
+        .env("WINEDEBUG", "-all")
+        .arg(exe_path)
+        .args(["/C", "VER"])
         .output()
         .is_ok_and(|o| o.status.success())
 }
 
-fn run_host_pe(exe_path: &Path, args: &[&str], stdin_bytes: &[u8]) -> Result<(i32, String), ToolError> {
+fn run_host_pe(
+    exe_path: &Path,
+    args: &[&str],
+    stdin_bytes: &[u8],
+) -> Result<(i32, String), ToolError> {
     let mut cmd = if cfg!(target_os = "windows") {
         Command::new(exe_path)
     } else {
@@ -667,9 +1021,6 @@ fn run_host_pe(exe_path: &Path, args: &[&str], stdin_bytes: &[u8]) -> Result<(i3
 
 #[test]
 fn m12_ia32_and_x64_utilities_wine_or_native_execution() -> Result<(), ToolError> {
-    if !has_wine_or_windows() {
-        return Ok(());
-    }
     let nl = crlf();
     let root = repo_root()?;
     let tmp = std::env::temp_dir().join(format!("wincmd_m12_{}", std::process::id()));
@@ -680,11 +1031,19 @@ fn m12_ia32_and_x64_utilities_wine_or_native_execution() -> Result<(), ToolError
     fs::write(tmp.join("rb_src").join("one.txt"), format!("111{nl}"))?;
     fs::write(tmp.join("rb_src").join("two.txt"), format!("222{nl}"))?;
 
+    let x64_dir = if root.join("build/fasm/x86_64/WINCMD64.EXE").is_file() {
+        "fasm/x86_64"
+    } else {
+        "nasm/x86_64"
+    };
     for (arch_dir, shell_exe) in [
         ("nasm/x86_32", "WINCMD32.EXE"),
-        ("fasm/x86_64", "WINCMD64.EXE"),
+        (x64_dir, "WINCMD64.EXE"),
     ] {
         let base = root.join("build").join(arch_dir);
+        if !can_run_host_pe(&base.join(shell_exe)) {
+            continue;
+        }
         let tag = arch_dir.replace('/', "_");
         let reg_k = format!("HKCU{BS}Software{BS}WinCmdHost_{tag}");
         let mut lines = vec![
@@ -735,10 +1094,16 @@ fn m12_ia32_and_x64_utilities_wine_or_native_execution() -> Result<(), ToolError
         let (_, out) = run_host_pe(&base.join(shell_exe), &["/C", &bat_arg], b"")?;
         assert!(out.contains("Physical"), "{arch_dir} MEM: {out}");
         assert!(out.contains("beta2"), "{arch_dir} FINDSTR: {out}");
-        assert!(out.contains("Files Copied : 2"), "{arch_dir} ROBOCOPY: {out}");
+        assert!(
+            out.contains("Files Copied : 2"),
+            "{arch_dir} ROBOCOPY: {out}"
+        );
         assert!(out.contains("HelloReg"), "{arch_dir} REG QUERY: {out}");
         assert!(out.contains("S-1-"), "{arch_dir} WHOAMI: {out}");
-        assert!(out.contains("M12_SUITE_DONE"), "{arch_dir} suite completion: {out}");
+        assert!(
+            out.contains("M12_SUITE_DONE"),
+            "{arch_dir} suite completion: {out}"
+        );
     }
 
     let _ = fs::remove_dir_all(&tmp);

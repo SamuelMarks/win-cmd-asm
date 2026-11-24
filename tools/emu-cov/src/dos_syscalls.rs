@@ -322,7 +322,10 @@ impl DosVm {
 
         match ah {
             0x0F => {
-                let is_vol = self.vfs_meta.get(&key).is_some_and(|m| (m.attr & 0x08) != 0);
+                let is_vol = self
+                    .vfs_meta
+                    .get(&key)
+                    .is_some_and(|m| (m.attr & 0x08) != 0);
                 if !is_vol && let Some(data) = self.vfs.get(&key) {
                     let sz = u32::try_from(data.len()).unwrap_or(0).to_le_bytes();
                     self.write_u16(ds, fcb_off.wrapping_add(14), 128);
@@ -651,9 +654,7 @@ impl DosVm {
                 if (attr & 0x08) != 0 {
                     continue;
                 }
-                let (fp, fl) = clean
-                    .rsplit_once(BS)
-                    .map_or(("", clean), |(p, l)| (p, l));
+                let (fp, fl) = clean.rsplit_once(BS).map_or(("", clean), |(p, l)| (p, l));
                 if fp == dir_pfx && Self::simple_glob(pat_leaf, fl) {
                     results.push((fl.to_owned(), attr, u32::try_from(bytes.len()).unwrap_or(0)));
                 }
@@ -661,20 +662,31 @@ impl DosVm {
             self.dta_searches.insert(self.dta, (results, 0));
         }
 
-        let next_entry = self.dta_searches.get_mut(&self.dta).and_then(|(list, idx)| {
-            let item = list.get(*idx).cloned();
-            if item.is_some() {
-                *idx += 1;
-            }
-            item
-        });
+        let next_entry = self
+            .dta_searches
+            .get_mut(&self.dta)
+            .and_then(|(list, idx)| {
+                let item = list.get(*idx).cloned();
+                if item.is_some() {
+                    *idx += 1;
+                }
+                item
+            });
 
         if let Some((name, attr, sz)) = next_entry {
             let (seg, off) = self.dta;
             self.write_u8(seg, off.wrapping_add(21), attr);
             let sb = sz.to_le_bytes();
-            self.write_u16(seg, off.wrapping_add(26), u16::from_le_bytes([sb[0], sb[1]]));
-            self.write_u16(seg, off.wrapping_add(28), u16::from_le_bytes([sb[2], sb[3]]));
+            self.write_u16(
+                seg,
+                off.wrapping_add(26),
+                u16::from_le_bytes([sb[0], sb[1]]),
+            );
+            self.write_u16(
+                seg,
+                off.wrapping_add(28),
+                u16::from_le_bytes([sb[2], sb[3]]),
+            );
             for i in 0..13_u16 {
                 self.write_u8(seg, off.wrapping_add(30 + i), 0);
             }
@@ -790,7 +802,11 @@ impl DosVm {
             }
             0x7141 => {
                 let key = self.norm_vfs_key(&self.read_asciiz(ds, dx));
-                if self.vfs_meta.get(&key).is_some_and(|m| (m.attr & 0x01) != 0) {
+                if self
+                    .vfs_meta
+                    .get(&key)
+                    .is_some_and(|m| (m.attr & 0x01) != 0)
+                {
                     self.regs[0] = ErrCode::AccessDenied.code();
                     self.set_cf(true);
                 } else if self.vfs.remove(&key).is_some() {
@@ -902,7 +918,10 @@ impl DosVm {
                     return;
                 }
                 if exists
-                    && self.vfs_meta.get(&key).is_some_and(|m| (m.attr & 0x01) != 0)
+                    && self
+                        .vfs_meta
+                        .get(&key)
+                        .is_some_and(|m| (m.attr & 0x01) != 0)
                     && (action & 0x02) != 0
                 {
                     self.regs[0] = ErrCode::AccessDenied.code();
@@ -962,9 +981,7 @@ impl DosVm {
                     if (attr & 0x08) != 0 {
                         continue;
                     }
-                    let (fp, fl) = clean
-                        .rsplit_once(BS)
-                        .map_or(("", clean), |(p, l)| (p, l));
+                    let (fp, fl) = clean.rsplit_once(BS).map_or(("", clean), |(p, l)| (p, l));
                     if fp == dir_pfx && Self::simple_glob(pat_leaf, fl) {
                         let meta = self.vfs_meta.get(k);
                         let lfn = meta
@@ -1039,13 +1056,25 @@ impl DosVm {
         }
         self.write_u8(seg, off, attr);
         let sb = size.to_le_bytes();
-        self.write_u16(seg, off.wrapping_add(32), u16::from_le_bytes([sb[0], sb[1]]));
-        self.write_u16(seg, off.wrapping_add(34), u16::from_le_bytes([sb[2], sb[3]]));
+        self.write_u16(
+            seg,
+            off.wrapping_add(32),
+            u16::from_le_bytes([sb[0], sb[1]]),
+        );
+        self.write_u16(
+            seg,
+            off.wrapping_add(34),
+            u16::from_le_bytes([sb[2], sb[3]]),
+        );
         for (i, b) in lfn_name.bytes().take(259).enumerate() {
             self.write_u8(seg, off.wrapping_add(44 + u16::try_from(i).unwrap_or(0)), b);
         }
         for (i, b) in short_alias.bytes().take(13).enumerate() {
-            self.write_u8(seg, off.wrapping_add(304 + u16::try_from(i).unwrap_or(0)), b);
+            self.write_u8(
+                seg,
+                off.wrapping_add(304 + u16::try_from(i).unwrap_or(0)),
+                b,
+            );
         }
     }
 
@@ -1101,8 +1130,8 @@ impl DosVm {
                 let ro = reloc_off + r * 4;
                 if ro + 4 <= image.len() {
                     let item_off = u16::from_le_bytes([image[ro], image[ro + 1]]);
-                    let item_seg = u16::from_le_bytes([image[ro + 2], image[ro + 3]])
-                        .wrapping_add(load_seg);
+                    let item_seg =
+                        u16::from_le_bytes([image[ro + 2], image[ro + 3]]).wrapping_add(load_seg);
                     let cur = self.read_u16(item_seg, item_off);
                     self.write_u16(item_seg, item_off, cur.wrapping_add(load_seg));
                 }
@@ -1337,10 +1366,7 @@ impl DosVm {
     pub(crate) fn is_nul_device(raw: &str) -> bool {
         let leaf = raw.rsplit([BS, '/']).next().unwrap_or(raw).trim();
         let no_colon = leaf.strip_suffix(':').unwrap_or(leaf);
-        let stem = no_colon
-            .split_once('.')
-            .map_or(no_colon, |(s, _)| s)
-            .trim();
+        let stem = no_colon.split_once('.').map_or(no_colon, |(s, _)| s).trim();
         stem.eq_ignore_ascii_case("NUL")
     }
 

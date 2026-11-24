@@ -382,6 +382,8 @@
 .item_lp:
     cmp byte [rel g_exit_flag], 0
     jne .done
+    cmp byte [rel g_batch_ret_flag], 0
+    jne .done
     cmp byte [rel g_goto_pending], 0
     jne .done
     cmp dword [rel g_ctrl_break], 0
@@ -500,6 +502,8 @@
 
 .wild_next:
     cmp byte [rel g_exit_flag], 0
+    jne .wild_close
+    cmp byte [rel g_batch_ret_flag], 0
     jne .wild_close
     cmp byte [rel g_goto_pending], 0
     jne .wild_close
@@ -632,6 +636,10 @@
 
 .sub_nx:
     cmp byte [rel g_exit_flag], 0
+    jne .sub_close
+    cmp byte [rel g_batch_ret_flag], 0
+    jne .sub_close
+    cmp byte [rel g_goto_pending], 0
     jne .sub_close
     mov rcx, rbp
     mov rdx, rbx
@@ -855,6 +863,8 @@
 
 .line_lp:
     cmp byte [rel g_exit_flag], 0
+    jne .done
+    cmp byte [rel g_batch_ret_flag], 0
     jne .done
     cmp byte [rel g_goto_pending], 0
     jne .done
@@ -1266,6 +1276,8 @@
     jz .done_cur
     cmp byte [rel g_exit_flag], 0
     jne .done_cur
+    cmp byte [rel g_batch_ret_flag], 0
+    jne .done_cur
     cmp byte [rel g_goto_pending], 0
     jne .done_cur
     cmp dword [rel g_ctrl_break], 0
@@ -1299,6 +1311,8 @@
     mov rcx, qword [rbp + AST_NODE64.pChild1]
     call exec_ast_node64
     cmp byte [rel g_exit_flag], 0
+    jne .done_cur
+    cmp byte [rel g_batch_ret_flag], 0
     jne .done_cur
     cmp byte [rel g_goto_pending], 0
     jne .done_cur
@@ -1456,6 +1470,8 @@
 
 .for_l_lp:
     cmp byte [rel g_exit_flag], 0
+    jne .done_cur
+    cmp byte [rel g_batch_ret_flag], 0
     jne .done_cur
     cmp byte [rel g_goto_pending], 0
     jne .done_cur
@@ -1796,6 +1812,7 @@
 
 .on_exit_b:
     mov byte [rel g_batch_ret_flag], 0
+    mov byte [rel g_goto_pending], 0
 
 .cleanup_frame:
     mov rcx, rbp

@@ -1355,6 +1355,8 @@
     add r2, r2, r1
     mvn r1, #0
     str r1, [r2, #BATCH_FRAME_A32.uFileOffHi] ; mark frame EOF!
+    mov r1, #1
+    strb r1, [r2, #BATCH_FRAME_A32.bJumped]
     mov r0, r3
     b .done
 

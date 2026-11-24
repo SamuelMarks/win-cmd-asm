@@ -10,4 +10,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy,llvm-tools-preview
 
 WORKDIR /workspace
-CMD ["bash", "-lc", "make all && cargo test --workspace"]
+CMD ["bash", "-lc", "export WINCMD_TC_DIR=/tmp/wincmd-tc && export PATH=\"/tmp/wincmd-tc/bin:$PATH\" && make all && cargo test --workspace"]

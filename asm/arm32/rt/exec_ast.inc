@@ -308,6 +308,8 @@
     bne .scan_file
     mvn r0, #0
     str r0, [r6, #BATCH_FRAME_A32.uFileOffHi]
+    mov r0, #1
+    strb r0, [r6, #BATCH_FRAME_A32.bJumped]
     mov r0, #0
     pop {r4, r5, r6, r7, r8, lr}
     bx lr
@@ -385,6 +387,8 @@
     b .ln_lp
 
 .found:
+    mov r0, #1
+    strb r0, [r6, #BATCH_FRAME_A32.bJumped]
     mov r0, #0
     pop {r4, r5, r6, r7, r8, lr}
     bx lr
@@ -392,6 +396,8 @@
 .not_found:
     mvn r0, #0
     str r0, [r6, #BATCH_FRAME_A32.uFileOffHi]
+    mov r0, #1
+    strb r0, [r6, #BATCH_FRAME_A32.bJumped]
 .err1:
     mov r0, #1
     pop {r4, r5, r6, r7, r8, lr}
@@ -442,6 +448,8 @@
     cmp r0, #0
     beq .unwind_restore_arena
 
+    mov r0, #0
+    strb r0, [r6, #BATCH_FRAME_A32.bJumped]
     mov r0, r7
     mov r1, #1 ; in_batch = 1
     bl exec_line_str_a32
@@ -1506,7 +1514,18 @@
     ldrb r1, [r0, #ARM32_CTX.bCtrlBreak]
     cmp r1, #0
     bne .cur_err
+    ldr r1, [r0, #ARM32_CTX.dwBatchDepth]
+    cmp r1, #0
+    beq .chk_kind
+    sub r1, r1, #1
+    lsl r1, r1, #6
+    ldr r2, [r0, #ARM32_CTX.pBatchStack]
+    add r2, r2, r1
+    ldrb r1, [r2, #BATCH_FRAME_A32.bJumped]
+    cmp r1, #0
+    bne .cur_err
 
+.chk_kind:
     ldrb r1, [r4, #AST_NODE_A32.bKind]
     cmp r1, #AST_SIMPLE_CMD
     beq .do_simple

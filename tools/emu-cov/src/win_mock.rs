@@ -553,7 +553,13 @@ pub enum WinHandle {
 
 /// Callback signature invoked when `CreateProcessW` launches a nested `wincmd` subshell.
 pub type ChildRunnerFn = Box<
-    dyn FnMut(&str, Rc<RefCell<SharedWinEnv>>, u64, u64, u64) -> Result<(u32, Vec<u8>, Vec<u8>), ToolError>,
+    dyn FnMut(
+        &str,
+        Rc<RefCell<SharedWinEnv>>,
+        u64,
+        u64,
+        u64,
+    ) -> Result<(u32, Vec<u8>, Vec<u8>), ToolError>,
 >;
 
 /// Per-process simulated OS state (`COREDLL.DLL` or `KERNEL32`/`NTDLL`/`ADVAPI32`).
@@ -629,7 +635,10 @@ impl WinProcState {
         handles.insert(0x11, WinHandle::StdOut);
         handles.insert(0x12, WinHandle::StdErr);
         let (cwd, self_exe) = if is_wince {
-            (bs_str().to_owned(), format!("{BS}Windows{BS}WINCMD_ARMV4.EXE"))
+            (
+                bs_str().to_owned(),
+                format!("{BS}Windows{BS}WINCMD_ARMV4.EXE"),
+            )
         } else if is_64bit {
             (
                 format!("C:{BS}"),
@@ -680,11 +689,7 @@ impl WinProcState {
     }
 
     const fn invalid_handle_val(&self) -> u64 {
-        if self.is_64bit {
-            u64::MAX
-        } else {
-            0xFFFF_FFFF
-        }
+        if self.is_64bit { u64::MAX } else { 0xFFFF_FFFF }
     }
 
     /// Executes a named `WinCE` / `WinNT` API import (`reg_args` = `r0..r3` or `x0..x7`,
@@ -783,7 +788,9 @@ impl WinProcState {
             "GetFileType" => {
                 let h = arg(0, mem)?;
                 let ft = match self.handles.get(&h) {
-                    Some(WinHandle::StdIn | WinHandle::StdOut | WinHandle::StdErr | WinHandle::Nul) => 2,
+                    Some(
+                        WinHandle::StdIn | WinHandle::StdOut | WinHandle::StdErr | WinHandle::Nul,
+                    ) => 2,
                     Some(WinHandle::PipeRead { .. } | WinHandle::PipeWrite { .. }) => 3,
                     Some(WinHandle::File { .. }) => 1,
                     _ => 0,
@@ -829,7 +836,10 @@ impl WinProcState {
                 let raw = mem.read_wstr(arg(0, mem)?)?;
                 let dst = arg(1, mem)?;
                 let cap = usize::try_from(arg(2, mem)?).unwrap_or(0);
-                let (disp, _) = self.shared.borrow().normalize_key(&raw, self.is_wince, &self.cwd);
+                let (disp, _) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&raw, self.is_wince, &self.cwd);
                 let cch = disp.encode_utf16().count();
                 if dst != 0 && cap > cch {
                     let n = mem.write_wstr(dst, &disp, cap)?;
@@ -940,7 +950,10 @@ impl WinProcState {
                 Ok(1)
             }
             "GetModuleHandleA" | "LoadLibraryA" => {
-                let name = mem.read_cstr(arg(0, mem)?).unwrap_or_default().to_ascii_uppercase();
+                let name = mem
+                    .read_cstr(arg(0, mem)?)
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
                 if name.is_empty() || name.contains("KERNEL32") {
                     Ok(0x7700_0000)
                 } else if name.contains("NTDLL") {
@@ -978,7 +991,10 @@ impl WinProcState {
             }
             "SetCurrentDirectoryW" => {
                 let p = mem.read_wstr(arg(0, mem)?)?;
-                let (disp, key) = self.shared.borrow().normalize_key(&p, self.is_wince, &self.cwd);
+                let (disp, key) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&p, self.is_wince, &self.cwd);
                 let ok = self
                     .shared
                     .borrow()
@@ -1172,7 +1188,10 @@ impl WinProcState {
             }
             "GetFileAttributesW" => {
                 let p = mem.read_wstr(arg(0, mem)?)?;
-                let (_, key) = self.shared.borrow().normalize_key(&p, self.is_wince, &self.cwd);
+                let (_, key) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&p, self.is_wince, &self.cwd);
                 if let Some(node) = self.shared.borrow().nodes.get(&key) {
                     Ok(u64::from(node.attrs))
                 } else {
@@ -1183,7 +1202,10 @@ impl WinProcState {
             "SetFileAttributesW" => {
                 let p = mem.read_wstr(arg(0, mem)?)?;
                 let attrs = u32::try_from(arg(1, mem)? & 0xFFFF_FFFF).unwrap_or(0x20);
-                let (_, key) = self.shared.borrow().normalize_key(&p, self.is_wince, &self.cwd);
+                let (_, key) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&p, self.is_wince, &self.cwd);
                 if let Some(node) = self.shared.borrow_mut().nodes.get_mut(&key) {
                     node.attrs = (node.attrs & 0x0410) | (attrs & !0x0410);
                     Ok(1)
@@ -1194,7 +1216,10 @@ impl WinProcState {
             }
             "DeleteFileW" => {
                 let p = mem.read_wstr(arg(0, mem)?)?;
-                let (_, key) = self.shared.borrow().normalize_key(&p, self.is_wince, &self.cwd);
+                let (_, key) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&p, self.is_wince, &self.cwd);
                 let can_del = self
                     .shared
                     .borrow()
@@ -1211,7 +1236,10 @@ impl WinProcState {
             }
             "CreateDirectoryW" => {
                 let p = mem.read_wstr(arg(0, mem)?)?;
-                let (disp, key) = self.shared.borrow().normalize_key(&p, self.is_wince, &self.cwd);
+                let (disp, key) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&p, self.is_wince, &self.cwd);
                 let mut env = self.shared.borrow_mut();
                 if env.nodes.contains_key(&key) {
                     self.last_error = 183;
@@ -1231,7 +1259,10 @@ impl WinProcState {
             }
             "RemoveDirectoryW" => {
                 let p = mem.read_wstr(arg(0, mem)?)?;
-                let (disp, key) = self.shared.borrow().normalize_key(&p, self.is_wince, &self.cwd);
+                let (disp, key) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&p, self.is_wince, &self.cwd);
                 let mut env = self.shared.borrow_mut();
                 let Some(node) = env.nodes.get(&key).cloned() else {
                     self.last_error = 2;
@@ -1272,7 +1303,9 @@ impl WinProcState {
                 };
                 if let Some(bytes) = data_opt {
                     let (disp, dk) =
-                        self.shared.borrow().normalize_key(&dst, self.is_wince, &self.cwd);
+                        self.shared
+                            .borrow()
+                            .normalize_key(&dst, self.is_wince, &self.cwd);
                     self.shared.borrow_mut().nodes.insert(
                         dk,
                         WinVfsNode {
@@ -1292,8 +1325,14 @@ impl WinProcState {
             "MoveFileW" | "MoveFileExW" => {
                 let src = mem.read_wstr(arg(0, mem)?)?;
                 let dst = mem.read_wstr(arg(1, mem)?)?;
-                let (disp, dk) = self.shared.borrow().normalize_key(&dst, self.is_wince, &self.cwd);
-                let (_, sk) = self.shared.borrow().normalize_key(&src, self.is_wince, &self.cwd);
+                let (disp, dk) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&dst, self.is_wince, &self.cwd);
+                let (_, sk) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&src, self.is_wince, &self.cwd);
                 let mut env = self.shared.borrow_mut();
                 if let Some(mut node) = env.nodes.remove(&sk) {
                     node.display_path = disp;
@@ -1360,7 +1399,10 @@ impl WinProcState {
                 let target = mem.read_wstr(arg(1, mem)?)?;
                 let flags = u32::try_from(arg(2, mem)? & 0xFFFF_FFFF).unwrap_or(0);
                 let is_dir = (flags & 0x1) != 0;
-                let (disp, lk) = self.shared.borrow().normalize_key(&link, self.is_wince, &self.cwd);
+                let (disp, lk) =
+                    self.shared
+                        .borrow()
+                        .normalize_key(&link, self.is_wince, &self.cwd);
                 self.shared.borrow_mut().nodes.insert(
                     lk,
                     WinVfsNode {
@@ -1384,7 +1426,9 @@ impl WinProcState {
                 };
                 if let Some(data_rc) = shared_data {
                     let (disp, lk) =
-                        self.shared.borrow().normalize_key(&link, self.is_wince, &self.cwd);
+                        self.shared
+                            .borrow()
+                            .normalize_key(&link, self.is_wince, &self.cwd);
                     self.shared.borrow_mut().nodes.insert(
                         lk,
                         WinVfsNode {
@@ -1410,7 +1454,10 @@ impl WinProcState {
                 self.device_io_control(mem, h, code, in_buf, out_buf, bytes_ret_ptr)
             }
             "GetModuleHandleW" | "LoadLibraryW" => {
-                let name = mem.read_wstr(arg(0, mem)?).unwrap_or_default().to_ascii_uppercase();
+                let name = mem
+                    .read_wstr(arg(0, mem)?)
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
                 if name.contains("KERNEL32") {
                     Ok(0x7700_0000)
                 } else if name.contains("NTDLL") {
@@ -1532,14 +1579,21 @@ impl WinProcState {
                 let cap = usize::try_from(arg(1, mem)?).unwrap_or(0);
                 let dst = arg(2, mem)?;
                 let part_ptr = arg(3, mem)?;
-                let (disp, _) = self.shared.borrow().normalize_key(&raw, self.is_wince, &self.cwd);
+                let (disp, _) = self
+                    .shared
+                    .borrow()
+                    .normalize_key(&raw, self.is_wince, &self.cwd);
                 if dst != 0 && cap > disp.encode_utf16().count() {
                     let n = mem.write_wstr(dst, &disp, cap)?;
                     if part_ptr != 0 {
                         let leaf_u16_off = disp
                             .rfind(BS)
                             .map_or(0, |idx| disp[..=idx].encode_utf16().count() * 2);
-                        mem.write_ptr(part_ptr, dst + u64::try_from(leaf_u16_off).unwrap_or(0), is_64)?;
+                        mem.write_ptr(
+                            part_ptr,
+                            dst + u64::try_from(leaf_u16_off).unwrap_or(0),
+                            is_64,
+                        )?;
                     }
                     Ok(u64::from(n))
                 } else {
@@ -1632,7 +1686,11 @@ impl WinProcState {
                 let sub = mem.read_wstr(arg(1, mem)?)?;
                 let out_hk = arg(4, mem)?;
                 let full = format!("{}{BS}{}", Self::reg_root_name(root), sub.trim_matches(BS));
-                let exists = self.shared.borrow().registry.contains_key(&full.to_ascii_uppercase());
+                let exists = self
+                    .shared
+                    .borrow()
+                    .registry
+                    .contains_key(&full.to_ascii_uppercase());
                 if exists {
                     let hk = self.alloc_handle(WinHandle::RegKey {
                         path: full.to_ascii_uppercase(),
@@ -1649,7 +1707,11 @@ impl WinProcState {
                 let out_hk = arg(7, mem)?;
                 let full = format!("{}{BS}{}", Self::reg_root_name(root), sub.trim_matches(BS))
                     .to_ascii_uppercase();
-                self.shared.borrow_mut().registry.entry(full.clone()).or_default();
+                self.shared
+                    .borrow_mut()
+                    .registry
+                    .entry(full.clone())
+                    .or_default();
                 let hk = self.alloc_handle(WinHandle::RegKey { path: full });
                 mem.write_ptr(out_hk, hk, is_64)?;
                 Ok(0)
@@ -1725,17 +1787,17 @@ impl WinProcState {
             "RegDeleteKeyW" | "RegDeleteKeyExW" => {
                 let root = arg(0, mem)?;
                 let sub = mem.read_wstr(arg(1, mem)?)?;
-                let base = if let Some(WinHandle::RegKey { path }) = self.handles.get(&root).cloned()
-                {
-                    if sub.is_empty() {
-                        path
+                let base =
+                    if let Some(WinHandle::RegKey { path }) = self.handles.get(&root).cloned() {
+                        if sub.is_empty() {
+                            path
+                        } else {
+                            format!("{path}{BS}{}", sub.trim_matches(BS)).to_ascii_uppercase()
+                        }
                     } else {
-                        format!("{path}{BS}{}", sub.trim_matches(BS)).to_ascii_uppercase()
-                    }
-                } else {
-                    format!("{}{BS}{}", Self::reg_root_name(root), sub.trim_matches(BS))
-                        .to_ascii_uppercase()
-                };
+                        format!("{}{BS}{}", Self::reg_root_name(root), sub.trim_matches(BS))
+                            .to_ascii_uppercase()
+                    };
                 let removed = self.shared.borrow_mut().registry.remove(&base).is_some();
                 Ok(if removed { 0 } else { 2 })
             }
@@ -1820,9 +1882,7 @@ impl WinProcState {
                 let info_len = usize::try_from(arg(3, mem)?).unwrap_or(0);
                 let ret_len_ptr = arg(4, mem)?;
                 // Binary SID S-1-5-21-500 (16 bytes): rev=1, count=2, auth=[0,0,0,0,0,5], sub0=21, sub1=500
-                let sid_bytes: [u8; 16] = [
-                    1, 2, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 244, 1, 0, 0,
-                ];
+                let sid_bytes: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 244, 1, 0, 0];
                 let hdr_sz: usize = if is_64 { 16 } else { 8 };
                 if class == 1 {
                     let need = hdr_sz + sid_bytes.len();
@@ -2107,10 +2167,10 @@ impl WinProcState {
         let backup_sem = (flags & 0x0200_0000) != 0;
         let writable = (access & 0x4000_0000) != 0 || (access & 0x0000_0100) != 0;
 
-        let (disp, raw_key) = self
-            .shared
-            .borrow()
-            .normalize_key(raw_path, self.is_wince, &self.cwd);
+        let (disp, raw_key) =
+            self.shared
+                .borrow()
+                .normalize_key(raw_path, self.is_wince, &self.cwd);
         let key = if open_reparse {
             raw_key
         } else {
@@ -2254,7 +2314,11 @@ impl WinProcState {
             .borrow()
             .case_sensitive_dirs
             .contains(&dir_disp.to_ascii_uppercase())
-            || self.shared.borrow().case_sensitive_dirs.contains(&resolved_dir_key);
+            || self
+                .shared
+                .borrow()
+                .case_sensitive_dirs
+                .contains(&resolved_dir_key);
         let parent_up = if parent_disp.ends_with(BS) {
             parent_disp.to_ascii_uppercase()
         } else {
@@ -2436,42 +2500,13 @@ impl WinProcState {
         let app = mem.read_wstr(app_ptr)?;
         let cmd = mem.read_wstr(cmd_ptr)?;
 
-        if !app.is_empty() {
-            if std::path::Path::new(&app)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("com"))
-            {
-                self.last_error = 193;
-                return Ok(0);
-            }
-            if let Some(bytes) = self.shared.borrow().read_file(&app)
-                && bytes.len() >= 2
-                && &bytes[0..2] == b"MZ"
-            {
-                let is_pe = if bytes.len() >= 0x40 {
-                    let lfanew = usize::try_from(u32::from_le_bytes([
-                        bytes[0x3C],
-                        bytes[0x3D],
-                        bytes[0x3E],
-                        bytes[0x3F],
-                    ]))
-                    .unwrap_or(0);
-                    bytes.get(lfanew..lfanew + 4) == Some(&[b'P', b'E', 0, 0])
-                } else {
-                    false
-                };
-                if !is_pe {
-                    self.last_error = 193;
-                    return Ok(0);
-                }
-            }
+        if !self.is_valid_pe_spawn_target(&app) {
+            self.last_error = 193;
+            return Ok(0);
         }
 
-        let (mut child_in, mut child_out, mut child_err) = (
-            self.std_in_handle,
-            self.std_out_handle,
-            self.std_err_handle,
-        );
+        let (mut child_in, mut child_out, mut child_err) =
+            (self.std_in_handle, self.std_out_handle, self.std_err_handle);
         if si_ptr != 0 && !self.is_wince {
             let flags_off = if self.is_64bit { 60 } else { 44 };
             let dw_flags = mem.read_u32_le(si_ptr.wrapping_add(flags_off))?;
@@ -2489,9 +2524,21 @@ impl WinProcState {
         }
 
         // Convert parent handles to Pipe/File/Std descriptors in child
-        let in_desc = self.handles.get(&child_in).cloned().unwrap_or(WinHandle::StdIn);
-        let out_desc = self.handles.get(&child_out).cloned().unwrap_or(WinHandle::StdOut);
-        let err_desc = self.handles.get(&child_err).cloned().unwrap_or(WinHandle::StdErr);
+        let in_desc = self
+            .handles
+            .get(&child_in)
+            .cloned()
+            .unwrap_or(WinHandle::StdIn);
+        let out_desc = self
+            .handles
+            .get(&child_out)
+            .cloned()
+            .unwrap_or(WinHandle::StdOut);
+        let err_desc = self
+            .handles
+            .get(&child_err)
+            .cloned()
+            .unwrap_or(WinHandle::StdErr);
 
         let exit_code = if let Some(mut runner) = self.child_runner.take() {
             let full_cmd = if self.is_wince {
@@ -2538,6 +2585,35 @@ impl WinProcState {
             }
         }
         Ok(1)
+    }
+
+    fn is_valid_pe_spawn_target(&self, app: &str) -> bool {
+        if app.is_empty() {
+            return true;
+        }
+        if std::path::Path::new(app)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("com"))
+        {
+            return false;
+        }
+        if let Some(bytes) = self.shared.borrow().read_file(app)
+            && bytes.len() >= 2
+            && &bytes[0..2] == b"MZ"
+        {
+            if bytes.len() < 0x40 {
+                return false;
+            }
+            let lfanew = usize::try_from(u32::from_le_bytes([
+                bytes[0x3C],
+                bytes[0x3D],
+                bytes[0x3E],
+                bytes[0x3F],
+            ]))
+            .unwrap_or(0);
+            return bytes.get(lfanew..lfanew + 4) == Some(&[b'P', b'E', 0, 0]);
+        }
+        true
     }
 
     const fn encode_inherited_handle(desc: &WinHandle) -> u64 {

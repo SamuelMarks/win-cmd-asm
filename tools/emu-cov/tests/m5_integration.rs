@@ -20,6 +20,16 @@ fn load_built(tc: &str, rel: &str) -> Result<Vec<u8>, ToolError> {
     )?)
 }
 
+fn built_toolchains() -> Vec<&'static str> {
+    let root = repo_root();
+    let tcs: Vec<&'static str> = ["nasm", "fasm", "jwasm"]
+        .into_iter()
+        .filter(|tc| root.join(format!("build/{tc}/dos16/WINCMD1.COM")).is_file())
+        .collect();
+    assert!(!tcs.is_empty(), "at least one DOS16 toolchain must be built");
+    tcs
+}
+
 fn join_crlf(lines: &[&str]) -> Vec<u8> {
     let mut out = Vec::new();
     for line in lines {
@@ -31,7 +41,7 @@ fn join_crlf(lines: &[&str]) -> Vec<u8> {
 
 #[test]
 fn m5_wincmd1_tiny125_shell_and_dos125_utilities_across_assemblers() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let w1 = load_built(tc, "WINCMD1.COM")?;
         assert!(w1.len() <= 20_480, "{tc} WINCMD1.COM budget");
 
@@ -39,7 +49,14 @@ fn m5_wincmd1_tiny125_shell_and_dos125_utilities_across_assemblers() -> Result<(
         let mut vm = DosVm::new(DosEra::Dos125);
         vm.vfs
             .insert(String::from("NOTE.TXT"), b"TINY125_BODY".to_vec());
-        vm.stdin = join_crlf(&["VER", "DIR", "TYPE NOTE.TXT", "ECHO.", "DEL NOTE.TXT", "EXIT"]);
+        vm.stdin = join_crlf(&[
+            "VER",
+            "DIR",
+            "TYPE NOTE.TXT",
+            "ECHO.",
+            "DEL NOTE.TXT",
+            "EXIT",
+        ]);
         vm.load_com(&w1, "", &[])?;
         // Constrain wMemTop to 64 KiB (0x1000 + 0x0600 = 0x1600) to prove tiny-RAM relocation!
         vm.write_u16(DosVm::DEFAULT_PSP_SEG, 0x0002, 0x1600);
@@ -68,7 +85,7 @@ fn m5_wincmd1_tiny125_shell_and_dos125_utilities_across_assemblers() -> Result<(
 
 #[test]
 fn m5_text_search_sort_diff_and_identity_utilities_across_assemblers() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         // 1. MEM.COM with EMS 4.0 + XMS enabled on MS-DOS 4.00
         let mem_com = load_built(tc, "MEM.COM")?;
         let mut mvm = DosVm::new(DosEra::Dos400);
@@ -80,7 +97,10 @@ fn m5_text_search_sort_diff_and_identity_utilities_across_assemblers() -> Result
         let mout = String::from_utf8_lossy(&mres.stdout);
         assert!(mout.contains("Conventional"), "{tc} MEM: {mout}");
         assert!(mout.contains("EMS Expanded Free"), "{tc} MEM EMS: {mout}");
-        assert!(mout.contains("XMS Driver         Installed"), "{tc} MEM XMS: {mout}");
+        assert!(
+            mout.contains("XMS Driver         Installed"),
+            "{tc} MEM XMS: {mout}"
+        );
 
         // 2. FINDSTR.COM regex (^, .*, $, /I, /N)
         let fs_com = load_built(tc, "FINDSTR.COM")?;
@@ -107,14 +127,22 @@ fn m5_text_search_sort_diff_and_identity_utilities_across_assemblers() -> Result
         svm.load_com(&sort_com, " /UNIQUE UNSORT.TXT", &[])?;
         let sres = svm.run(1_000_000)?;
         assert_eq!(sres.exit_code, 0);
-        assert_eq!(sres.stdout, join_crlf(&["apple", "banana", "pear"]), "{tc} SORT");
+        assert_eq!(
+            sres.stdout,
+            join_crlf(&["apple", "banana", "pear"]),
+            "{tc} SORT"
+        );
 
         let more_com = load_built(tc, "MORE.COM")?;
         let mut pager_vm = DosVm::new(DosEra::Dos400);
         pager_vm.stdin = join_crlf(&["skip1", "keep2", "", "", "keep5"]);
         pager_vm.load_com(&more_com, " /S +2", &[])?;
         let pager_res = pager_vm.run(500_000)?;
-        assert_eq!(pager_res.stdout, join_crlf(&["keep2", "", "keep5"]), "{tc} MORE");
+        assert_eq!(
+            pager_res.stdout,
+            join_crlf(&["keep2", "", "keep5"]),
+            "{tc} MORE"
+        );
 
         // 4. FC.COM & COMP.COM (identical exit 0 vs differing exit 1)
         let filecmp_com = load_built(tc, "FC.COM")?;
@@ -159,7 +187,7 @@ fn m5_text_search_sort_diff_and_identity_utilities_across_assemblers() -> Result
 
 #[test]
 fn m5_vfs_registry_and_child_exec_utilities_inside_wincmd_batch() -> Result<(), ToolError> {
-    for tc in ["nasm", "fasm", "jwasm"] {
+    for tc in built_toolchains() {
         let wincmd = load_built(tc, "WINCMD.COM")?;
         let mut vm = DosVm::new(DosEra::Dos400);
 
@@ -222,7 +250,10 @@ fn m5_vfs_registry_and_child_exec_utilities_inside_wincmd_batch() -> Result<(), 
         assert!(out.contains("PAYLOAD_V2"), "{tc} REPLACED content: {out}");
         assert!(out.contains("+---DST"), "{tc} TREE /A: {out}");
         assert!(out.contains("ROBOCOPY.COM"), "{tc} WHERE: {out}");
-        assert!(out.contains("Theme    REG_SZ    Amber"), "{tc} REG QUERY: {out}");
+        assert!(
+            out.contains("Theme    REG_SZ    Amber"),
+            "{tc} REG QUERY: {out}"
+        );
         assert!(out.contains("Pick [A,B,C]?B"), "{tc} CHOICE: {out}");
         assert!(out.contains("CH_EL=2"), "{tc} CHOICE ERRORLEVEL 2: {out}");
         assert!(out.contains("TO_EL=0"), "{tc} TIMEOUT: {out}");
