@@ -543,6 +543,11 @@ banner_msg:
 
             let x64 = convert_source("w64.asm", SAMPLE_X64, tgt)?;
             assert!(x64.contains("w64_entry"));
+            if tgt == TargetAssembler::Nasm {
+                assert!(x64.contains("%if __NASM_MAJOR__ >= 3"));
+                assert!(x64.contains("GLOBAL w64_entry:function"));
+                assert!(x64.contains("GLOBAL w64_entry\n%endif"));
+            }
         }
 
         let com286 = ";; @file a.asm

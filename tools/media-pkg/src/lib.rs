@@ -104,14 +104,14 @@ fn standalone_build_sh(tc: &str) -> String {
             "#!/bin/sh
 set -eu
 mkdir -p build/dos16 build/win16
-nasm -Ox -w+all -w-reloc -w+error -I src/nasm/dos16/ -f bin src/nasm/dos16/wincmd.asm -o build/dos16/WINCMD.COM
-nasm -Ox -w+all -w-reloc -w+error -I src/nasm/dos16/ -f bin src/nasm/dos16/wincmd1.asm -o build/dos16/WINCMD1.COM
-nasm -Ox -w+all -w-reloc -w+error -f bin src/nasm/dos16/wincmd_m.asm -o build/dos16/WINCMD.MSG
-nasm -Ox -w+all -w-reloc -w+error -f bin src/nasm/dos16/util/asmconv.asm -o build/dos16/ASMCONV.COM
-nasm -Ox -w+all -w-reloc -w+error -f obj src/nasm/dos16/wincmdmz.asm -o build/dos16/wincmdmz.obj
-nasm -Ox -w+all -w-reloc -w+error -I src/nasm/win16/ -f bin src/nasm/win16/w16_pif.asm -o build/win16/WINCMD.PIF
-nasm -Ox -w+all -w-reloc -w+error -I src/nasm/win16/ -f bin src/nasm/win16/w16_main.asm -o build/win16/WINCMD16.EXE
-nasm -Ox -w+all -w-reloc -w+error -I src/nasm/win16/ -f bin src/nasm/win16/w16_286.asm -o build/win16/WINCMD286.EXE
+nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I src/nasm/dos16/ -f bin src/nasm/dos16/wincmd.asm -o build/dos16/WINCMD.COM
+nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I src/nasm/dos16/ -f bin src/nasm/dos16/wincmd1.asm -o build/dos16/WINCMD1.COM
+nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -f bin src/nasm/dos16/wincmd_m.asm -o build/dos16/WINCMD.MSG
+nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -f bin src/nasm/dos16/util/asmconv.asm -o build/dos16/ASMCONV.COM
+nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -f obj src/nasm/dos16/wincmdmz.asm -o build/dos16/wincmdmz.obj
+nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I src/nasm/win16/ -f bin src/nasm/win16/w16_pif.asm -o build/win16/WINCMD.PIF
+nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I src/nasm/win16/ -f bin src/nasm/win16/w16_main.asm -o build/win16/WINCMD16.EXE
+nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I src/nasm/win16/ -f bin src/nasm/win16/w16_286.asm -o build/win16/WINCMD286.EXE
 ",
         ),
         "fasm" => String::from(

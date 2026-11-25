@@ -1,7 +1,7 @@
 @ECHO OFF
 SETLOCAL
 REM Native Windows NT 3.1 .. Windows 11 Multi-ISA, Multi-Assembler Build Script
-REM Usage: BUILD.CMD [all | lint | lower | build | verify | package | test | ci | clean | hooks | nasm | fasm | jwasm]
+REM Usage: BUILD.CMD [all | lint | lower | build | verify | package | test | fuzz | coverage | ci | clean | hooks | nasm | fasm | jwasm]
 
 IF /I "%~1"=="clean" GOTO :CLEAN
 IF /I "%~1"=="hooks" (
@@ -48,31 +48,31 @@ WHERE nasm >NUL 2>NUL
 IF NOT ERRORLEVEL 1 (
     IF NOT EXIST "build/nasm/dos16" MKDIR "build/nasm/dos16"
     IF NOT EXIST "build/nasm/win16" MKDIR "build/nasm/win16"
-    nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/dos16/ -f bin dist/src/nasm/dos16/wincmd.asm -o build/nasm/dos16/WINCMD.COM || EXIT /B 1
-    nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/dos16/ -f bin dist/src/nasm/dos16/wincmd1.asm -o build/nasm/dos16/WINCMD1.COM || EXIT /B 1
-    nasm -Ox -w+all -w-reloc -w+error -f bin dist/src/nasm/dos16/wincmd_m.asm -o build/nasm/dos16/WINCMD.MSG || EXIT /B 1
-    nasm -Ox -w+all -w-reloc -w+error -f bin dist/src/nasm/dos16/util/asmconv.asm -o build/nasm/dos16/ASMCONV.COM || EXIT /B 1
-    nasm -Ox -w+all -w-reloc -w+error -f obj dist/src/nasm/dos16/wincmdmz.asm -o build/nasm/dos16/wincmdmz.obj || EXIT /B 1
+    nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/dos16/ -f bin dist/src/nasm/dos16/wincmd.asm -o build/nasm/dos16/WINCMD.COM || EXIT /B 1
+    nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/dos16/ -f bin dist/src/nasm/dos16/wincmd1.asm -o build/nasm/dos16/WINCMD1.COM || EXIT /B 1
+    nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -f bin dist/src/nasm/dos16/wincmd_m.asm -o build/nasm/dos16/WINCMD.MSG || EXIT /B 1
+    nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -f bin dist/src/nasm/dos16/util/asmconv.asm -o build/nasm/dos16/ASMCONV.COM || EXIT /B 1
+    nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -f obj dist/src/nasm/dos16/wincmdmz.asm -o build/nasm/dos16/wincmdmz.obj || EXIT /B 1
     FOR %%U IN (mem attrib find findstr sort more fc comp tree where xcopy replace robocopy choice timeout truename reg hostname whoami) DO (
-        nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/dos16/util/ -f bin dist/src/nasm/dos16/util/%%U.asm -o build/nasm/dos16/%%U.COM || EXIT /B 1
+        nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/dos16/util/ -f bin dist/src/nasm/dos16/util/%%U.asm -o build/nasm/dos16/%%U.COM || EXIT /B 1
     )
-    nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_pif.asm -o build/nasm/win16/WINCMD.PIF || EXIT /B 1
-    nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_main.asm -o build/nasm/win16/WINCMD16.EXE || EXIT /B 1
-    nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_286.asm -o build/nasm/win16/WINCMD286.EXE || EXIT /B 1
+    nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_pif.asm -o build/nasm/win16/WINCMD.PIF || EXIT /B 1
+    nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_main.asm -o build/nasm/win16/WINCMD16.EXE || EXIT /B 1
+    nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_286.asm -o build/nasm/win16/WINCMD286.EXE || EXIT /B 1
     WHERE lld-link >NUL 2>NUL
     IF NOT ERRORLEVEL 1 (
         IF NOT EXIST "build/nasm/x86_32" MKDIR "build/nasm/x86_32"
         IF NOT EXIST "build/nasm/x86_64" MKDIR "build/nasm/x86_64"
-        nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/x86_32/ -f win32 dist/src/nasm/x86_32/wincmd32.asm -o build/nasm/x86_32/wincmd32.obj || EXIT /B 1
+        nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/x86_32/ -f win32 dist/src/nasm/x86_32/wincmd32.asm -o build/nasm/x86_32/wincmd32.obj || EXIT /B 1
         lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup build/nasm/x86_32/wincmd32.obj build/libs/kernel32_x86.lib /OUT:build/nasm/x86_32/WINCMD32.EXE || EXIT /B 1
         FOR %%U IN (mem attrib find findstr sort more fc comp tree where xcopy replace robocopy choice timeout truename reg hostname whoami) DO (
-            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/x86_32/util/ -f win32 dist/src/nasm/x86_32/util/%%U.asm -o build/nasm/x86_32/u_%%U.obj || EXIT /B 1
+            nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/x86_32/util/ -f win32 dist/src/nasm/x86_32/util/%%U.asm -o build/nasm/x86_32/u_%%U.obj || EXIT /B 1
             lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,3.10 /SAFESEH /DYNAMICBASE /NXCOMPAT /ENTRY:mainCRTStartup build/nasm/x86_32/u_%%U.obj build/libs/kernel32_x86.lib /OUT:build/nasm/x86_32/%%U.EXE || EXIT /B 1
         )
-        nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/x86_64/ -f win64 dist/src/nasm/x86_64/wincmd64.asm -o build/nasm/x86_64/wincmd64.obj || EXIT /B 1
+        nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/x86_64/ -f win64 dist/src/nasm/x86_64/wincmd64.asm -o build/nasm/x86_64/wincmd64.obj || EXIT /B 1
         lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,5.02 /STACK:1048576,65536 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /CETCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/nasm/x86_64/wincmd64.obj build/libs/kernel32_x64.lib /OUT:build/nasm/x86_64/WINCMD64.EXE || EXIT /B 1
         FOR %%U IN (mem attrib find findstr sort more fc comp tree where xcopy replace robocopy choice timeout truename reg hostname whoami) DO (
-            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/x86_64/util/ -f win64 dist/src/nasm/x86_64/util/%%U.asm -o build/nasm/x86_64/u_%%U.obj || EXIT /B 1
+            nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/x86_64/util/ -f win64 dist/src/nasm/x86_64/util/%%U.asm -o build/nasm/x86_64/u_%%U.obj || EXIT /B 1
             lld-link /NOLOGO /NODEFAULTLIB /BREPRO /SUBSYSTEM:CONSOLE,5.02 /STACK:1048576,65536 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /CETCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/nasm/x86_64/u_%%U.obj build/libs/kernel32_x64.lib /OUT:build/nasm/x86_64/%%U.EXE || EXIT /B 1
         )
     )
@@ -197,6 +197,14 @@ IF /I "%~1"=="test" (
     cargo test --workspace || EXIT /B 1
     GOTO :DONE
 )
+IF /I "%~1"=="fuzz" (
+    cargo run --release --quiet -p diff-fuzz -- --cross-isa --seed 0x20261123 --cases 200 --build-dir build || EXIT /B 1
+    GOTO :DONE
+)
+IF /I "%~1"=="coverage" (
+    cargo llvm-cov --workspace --summary-only || EXIT /B 1
+    GOTO :DONE
+)
 GOTO :DONE
 
 :VERIFY
@@ -212,6 +220,8 @@ GOTO :DONE
 :CLEAN
 IF EXIST build RMDIR /S /Q build
 IF EXIST dist RMDIR /S /Q dist
+IF EXIST lcov.info DEL /F /Q lcov.info
+IF EXIST lcov-rust.info DEL /F /Q lcov-rust.info
 GOTO :DONE
 
 :DONE

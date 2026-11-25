@@ -43,7 +43,7 @@ else
   export PATH="$EXTRA_LLVM_PATHS:$PATH"
 fi
 
-NASM_WARN=(-Ox -w+all -w-reloc -w+error)
+NASM_WARN=(-Ox -w+all -w-unknown-warning -w-reloc -w+error)
 JWASM_WARN=(-q -WX -W4)
 
 run_lint() {

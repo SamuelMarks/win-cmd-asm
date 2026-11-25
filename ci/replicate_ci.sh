@@ -118,7 +118,7 @@ run_stage_docker() {
     arm64|aarch64) plat_args=(--platform linux/amd64) ;;
   esac
   docker build "${plat_args[@]}" -f "$dockerfile" -t "$tag" .
-  docker run "${plat_args[@]}" --rm -v "$REPO_ROOT:/workspace:ro" -e TOOLCHAIN=all -e WINCMD_TC_DIR=/tmp/wincmd-tc "$tag" bash -lc 'mkdir -p /tmp/ws && cp -a /workspace/. /tmp/ws && cd /tmp/ws && rm -rf target build dist && make lint && make lower && make build TOOLCHAIN=all && make verify TOOLCHAIN=all && cargo test --workspace'
+  docker run "${plat_args[@]}" --rm -v "$REPO_ROOT:/workspace:ro" -e TOOLCHAIN=all -e WINCMD_TC_DIR=/tmp/wincmd-tc "$tag" bash -lc 'export PATH="/root/.cargo/bin:/tmp/wincmd-tc/bin:$PATH" && mkdir -p /tmp/ws && cp -a /workspace/. /tmp/ws && cd /tmp/ws && rm -rf target build dist && make lint && make lower && make build TOOLCHAIN=all && make verify TOOLCHAIN=all && cargo test --workspace'
 }
 
 run_stage_coverage() {

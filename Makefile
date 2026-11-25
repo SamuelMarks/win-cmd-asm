@@ -1,6 +1,6 @@
 # Reproducible Multi-ISA, Multi-Assembler Build & Verification Orchestrator
 # Supports GNU Make 3.81+ (macOS / Linux / MSYS2)
-# Usage: make [all|lint|lower|verify|test|fuzz|coverage|clean] [TOOLCHAIN=all|nasm|fasm|jwasm] [TARGET=all|dos16|win16|x86_32|x86_64|arm32|arm64]
+# Usage: make [all|lint|lower|build|verify|package|test|fuzz|coverage|ci-list|ci-local|ci-docker|ci-dos-qemu|hooks|clean] [TOOLCHAIN=all|nasm|fasm|jwasm|fasmarm|llvm] [TARGET=all|dos16|win16|x86_32|x86_64|arm32|arm64]
 
 TOOLCHAIN ?= all
 TARGET ?= all
@@ -55,4 +55,4 @@ hooks:
 	@git config core.hooksPath .githooks
 
 clean:
-	@rm -rf "$(BUILD_DIR)" "$(DIST_DIR)" dist/release lcov.info
+	@rm -rf "$(BUILD_DIR)" "$(DIST_DIR)" dist/release lcov.info lcov-rust.info

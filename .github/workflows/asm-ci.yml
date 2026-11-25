@@ -228,7 +228,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/wincmd-toolchains
-          key: wincmd-tc-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.cache_tag }}
+          key: wincmd-tc-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.cache_tag }}-${{ hashFiles('scripts/bootstrap-toolchains.sh') }}
 
       - name: Install Linux Dependencies (NASM, LLVM, LLD, Wine, dos2unix)
         if: runner.os == 'Linux'
@@ -274,17 +274,27 @@ jobs:
           $tcBin  = Join-Path $tcRoot 'bin'
           New-Item -ItemType Directory -Force -Path $tcBin | Out-Null
 
-          foreach ($llvmCand in @('C:\Program Files\LLVM\bin', 'C:\msys64\ucrt64\bin')) {
-            if (Test-Path (Join-Path $llvmCand 'lld-link.exe')) {
+          if (Test-Path 'C:\Program Files\LLVM\bin\lld-link.exe') {
+            Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
+            $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+          }
+          foreach ($llvmCand in @('C:\msys64\clang64\bin', 'C:\msys64\ucrt64\bin', 'C:\msys64\mingw64\bin')) {
+            if ((Test-Path (Join-Path $llvmCand 'llvm-mc.exe')) -and (Test-Path (Join-Path $llvmCand 'llvm-dlltool.exe'))) {
               Add-Content -Path $env:GITHUB_PATH -Value $llvmCand
-              $env:PATH = "$llvmCand;$env:PATH"
+              $env:PATH = "$env:PATH;$llvmCand"
               break
             }
           }
-          if (-not (Get-Command lld-link -ErrorAction SilentlyContinue)) {
-            choco install llvm -y --no-progress
+          $missingLlvm = @('clang', 'lld-link', 'llvm-mc', 'llvm-dlltool') | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) }
+          if ($missingLlvm) {
+            choco install llvm -y --no-progress --force
             Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
             $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+          }
+          foreach ($reqTool in @('clang', 'lld-link', 'llvm-mc', 'llvm-dlltool')) {
+            if (-not (Get-Command $reqTool -ErrorAction SilentlyContinue)) {
+              throw "Required LLVM tool '$reqTool' not found on PATH"
+            }
           }
 
           function Invoke-DownloadFile([string]$Url, [string]$OutFile) {
@@ -476,12 +486,12 @@ jobs:
             set -euo pipefail
             cd "$(cygpath -u "$GITHUB_WORKSPACE")"
             mkdir -p build/nasm/dos16 build/nasm/win16
-            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/dos16/ -f bin dist/src/nasm/dos16/wincmd.asm -o build/nasm/dos16/WINCMD.COM
-            nasm -Ox -w+all -w-reloc -w+error -f bin dist/src/nasm/dos16/wincmd_m.asm -o build/nasm/dos16/WINCMD.MSG
-            nasm -Ox -w+all -w-reloc -w+error -f bin dist/src/nasm/dos16/util/asmconv.asm -o build/nasm/dos16/ASMCONV.COM
-            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_pif.asm -o build/nasm/win16/WINCMD.PIF
-            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_main.asm -o build/nasm/win16/WINCMD16.EXE
-            nasm -Ox -w+all -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_286.asm -o build/nasm/win16/WINCMD286.EXE
+            nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/dos16/ -f bin dist/src/nasm/dos16/wincmd.asm -o build/nasm/dos16/WINCMD.COM
+            nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -f bin dist/src/nasm/dos16/wincmd_m.asm -o build/nasm/dos16/WINCMD.MSG
+            nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -f bin dist/src/nasm/dos16/util/asmconv.asm -o build/nasm/dos16/ASMCONV.COM
+            nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_pif.asm -o build/nasm/win16/WINCMD.PIF
+            nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_main.asm -o build/nasm/win16/WINCMD16.EXE
+            nasm -Ox -w+all -w-unknown-warning -w-reloc -w+error -I dist/src/nasm/win16/ -f bin dist/src/nasm/win16/w16_286.asm -o build/nasm/win16/WINCMD286.EXE
           '
           cargo run --release --quiet -p asm-lint -- --budget build/nasm/dos16/WINCMD.COM 49152
           cargo run --release --quiet -p asm-lint -- --budget build/nasm/dos16/ASMCONV.COM 4096
@@ -625,7 +635,7 @@ jobs:
       - name: Run Lint, Lower, Build, Verify & Cargo Test in ${{ matrix.distro }}
         shell: bash
         run: |
-          docker run --rm -v "${{ github.workspace }}:/workspace" -w /workspace -e TOOLCHAIN="${{ matrix.toolchain }}" -e WINCMD_TC_DIR=/tmp/wincmd-tc "${{ matrix.tag }}" bash -lc 'make lint && make lower && make build TOOLCHAIN="$TOOLCHAIN" && make verify TOOLCHAIN="$TOOLCHAIN" && cargo test --workspace'
+          docker run --rm -v "${{ github.workspace }}:/workspace" -w /workspace -e TOOLCHAIN="${{ matrix.toolchain }}" -e WINCMD_TC_DIR=/tmp/wincmd-tc "${{ matrix.tag }}" bash -lc 'export PATH="/root/.cargo/bin:/tmp/wincmd-tc/bin:$PATH" && make lint && make lower && make build TOOLCHAIN="$TOOLCHAIN" && make verify TOOLCHAIN="$TOOLCHAIN" && cargo test --workspace'
 
   # ============================================================================
   # 5. Rust Test Coverage, Doc Coverage & GitHub Step Summary
@@ -669,18 +679,15 @@ jobs:
           ASM_LINT_OUT="$(cargo run --release --quiet -p asm-lint -- --dir asm)"
 
           {
-            echo "## win-cmd-asm CI Verification Summary"
-            echo ""
-            echo "- **Assembly Doc / CFG / ABI / Purity:** `${ASM_LINT_OUT}` (**100.00%**)"
-            echo "- **Rust Workspace Line Coverage (`cargo-llvm-cov`):** **${TEST_PCT:-N/A}**"
-            echo ""
-            echo "### Built Artifact Footprint Report"
-            echo ""
-            echo "| Artifact | Size (bytes) |"
-            echo "| :--- | ---: |"
+            printf '## win-cmd-asm CI Verification Summary\n\n'
+            printf -- '- **Assembly Doc / CFG / ABI / Purity:** `%s` (**100.00%%**)\n' "$ASM_LINT_OUT"
+            printf -- '- **Rust Workspace Line Coverage (`cargo-llvm-cov`):** **%s**\n\n' "${TEST_PCT:-N/A}"
+            printf '### Built Artifact Footprint Report\n\n'
+            printf '| Artifact | Size (bytes) |\n'
+            printf '| :--- | ---: |\n'
             find build -type f \( -name '*.COM' -o -name '*.EXE' -o -name '*.MSG' -o -name '*.PIF' \) | sort | while IFS= read -r f; do
               sz="$(wc -c < "$f" | tr -d ' ')"
-              echo "| `$f` | $sz |"
+              printf '| `%s` | %s |\n' "$f" "$sz"
             done
           } >> "$GITHUB_STEP_SUMMARY"
 

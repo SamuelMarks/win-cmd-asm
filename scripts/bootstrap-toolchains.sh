@@ -77,7 +77,10 @@ if (need_tool fasm || need_tool fasmarm) && ! command -v fasm >/dev/null 2>&1 &&
 #!/usr/bin/env bash
 set -euo pipefail
 TC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-exec "$TC_DIR/fasm-linux/fasm.x64" "$@"
+if [ "$#" -gt 0 ]; then
+  exec "$TC_DIR/fasm-linux/fasm.x64" -m 262144 "$@"
+fi
+exec "$TC_DIR/fasm-linux/fasm.x64"
 EOF_LINUX_FASM
     chmod +x "$TC_ROOT/bin/fasm"
   else
@@ -139,14 +142,17 @@ if need_tool fasmarm && ! command -v fasmarm >/dev/null 2>&1 && [ ! -x "$TC_ROOT
           done
         fi
       done
-      (cd "$TC_ROOT/fasmarm-linux/source/linux/x64" && "$TC_ROOT/fasm-linux/fasm.x64" fasmarm.asm "$TC_ROOT/fasmarm-linux/fasmarm" >/dev/null)
+      (cd "$TC_ROOT/fasmarm-linux/source/linux/x64" && "$TC_ROOT/fasm-linux/fasm.x64" -m 262144 fasmarm.asm "$TC_ROOT/fasmarm-linux/fasmarm" >/dev/null)
       chmod +x "$TC_ROOT/fasmarm-linux/fasmarm"
     fi
     cat > "$TC_ROOT/bin/fasmarm" << 'EOF_LINUX_FASMARM'
 #!/usr/bin/env bash
 set -euo pipefail
 TC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-exec "$TC_DIR/fasmarm-linux/fasmarm" "$@"
+if [ "$#" -gt 0 ]; then
+  exec "$TC_DIR/fasmarm-linux/fasmarm" -m 262144 "$@"
+fi
+exec "$TC_DIR/fasmarm-linux/fasmarm"
 EOF_LINUX_FASMARM
     chmod +x "$TC_ROOT/bin/fasmarm"
   else

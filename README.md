@@ -4,7 +4,7 @@ win-cmd-asm
 [![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT%20OR%20CC0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![CI](https://github.com/SamuelMarks/win-cmd-asm/actions/workflows/ci.yml/badge.svg)](https://github.com/SamuelMarks/win-cmd-asm/actions/workflows/ci.yml)
 ![doc coverage](https://img.shields.io/badge/doc%20coverage-100.00%25-brightgreen)
-![test coverage](https://img.shields.io/badge/test%20coverage-85.00%25-green)
+![test coverage](https://img.shields.io/badge/test%20coverage-85.01%25-green)
 
 **100% CRT-free, canonical multi-ISA, multi-assembler, multi-OS assembly implementation of Windows Command Prompt (`CMD.EXE`), MS-DOS `COMMAND.COM`, a universal `.BAT` / `.CMD` / `.COM` / DOS `MZ` `.EXE` execution engine (including an embedded `vm8086` virtual 8086 CPU on 32/64-bit x86 and ARM), and the 19-binary companion command-line utility suite — backed by a strict zero-`unsafe` Rust lowering, static-analysis, 5-ISA emulation, differential fuzzing, and reproducible media-mastering workspace.**
 

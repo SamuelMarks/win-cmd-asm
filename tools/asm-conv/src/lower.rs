@@ -711,8 +711,9 @@ fn emit_x86_preamble(
         (BinaryFormat::Coff64, TargetAssembler::Nasm) => {
             let _ = writeln!(
                 out,
-                "CPU X64{LF}BITS 64{LF}DEFAULT REL{LF}GLOBAL @feat.00{LF}@feat.00 equ 0x2000{LF}GLOBAL _load_config_used{LF}GLOBAL __wincmd_cfg_nop:function{LF}EXTERN __guard_fids_table{LF}EXTERN __guard_fids_count{LF}EXTERN __guard_flags"
+                "CPU X64{LF}BITS 64{LF}DEFAULT REL{LF}GLOBAL @feat.00{LF}@feat.00 equ 0x2000{LF}GLOBAL _load_config_used{LF}EXTERN __guard_fids_table{LF}EXTERN __guard_fids_count{LF}EXTERN __guard_flags"
             );
+            emit_nasm_coff64_fn_global(out, "__wincmd_cfg_nop");
         }
         (BinaryFormat::Coff64, TargetAssembler::Fasm) if fasm_mode == FasmPeMode::Coff64 => {
             let _ = writeln!(
@@ -1761,6 +1762,13 @@ fn emit_include(out: &mut String, path: &str, target: TargetAssembler) {
     }
 }
 
+fn emit_nasm_coff64_fn_global(out: &mut String, symbol: &str) {
+    let _ = writeln!(
+        out,
+        "%if __NASM_MAJOR__ >= 3{LF}GLOBAL {symbol}:function{LF}%else{LF}GLOBAL {symbol}{LF}%endif"
+    );
+}
+
 fn emit_global(
     out: &mut String,
     symbol: &str,
@@ -1778,7 +1786,7 @@ fn emit_global(
     match target {
         TargetAssembler::Nasm => {
             if module.format == BinaryFormat::Coff64 {
-                let _ = writeln!(out, "GLOBAL {symbol}:function");
+                emit_nasm_coff64_fn_global(out, symbol);
             } else {
                 let _ = writeln!(out, "GLOBAL {symbol}");
             }
