@@ -295,8 +295,15 @@ fn emit_coff64_load_config(
         TargetAssembler::Nasm => {
             let _ = writeln!(
                 out,
-                "_load_config_used:{LF}    dd 256, 0, 0, 0, 0, 0{LF}    dq 0, 0, 0, 0, 0, 0{LF}    dd 0, 0{LF}    dq 0, 0, 0, 0{LF}    dq __wincmd_cfg_nop_ptr{LF}    dq 0{LF}    dq __guard_fids_table{LF}    dq __guard_fids_count{LF}    dd __guard_flags{LF}    dd 0, 0, 0{LF}    dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}__wincmd_cfg_nop_ptr:{LF}    dq __wincmd_cfg_nop"
+                "_load_config_used:{LF}    dd 256, 0, 0, 0, 0, 0{LF}    dq 0, 0, 0, 0, 0, 0{LF}    dd 0, 0{LF}    dq 0, 0, 0, 0{LF}    dq __wincmd_cfg_nop_ptr{LF}    dq 0{LF}    dq __wincmd_gfids_table{LF}    dq {gfids_cnt}{LF}    dd 0x00000500, 0, 0, 0{LF}    dq 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0{LF}__wincmd_cfg_nop_ptr:{LF}    dq __wincmd_cfg_nop{LF}    align 4, db 0{LF}__wincmd_gfids_table:"
             );
+            for sym in globals
+                .iter()
+                .copied()
+                .chain(std::iter::once("__wincmd_cfg_nop"))
+            {
+                let _ = writeln!(out, "    dd {sym} wrt ..imagebase");
+            }
         }
         TargetAssembler::Fasm if fasm_mode == FasmPeMode::Coff64 => {
             let _ = writeln!(
@@ -711,9 +718,8 @@ fn emit_x86_preamble(
         (BinaryFormat::Coff64, TargetAssembler::Nasm) => {
             let _ = writeln!(
                 out,
-                "CPU X64{LF}BITS 64{LF}DEFAULT REL{LF}GLOBAL @feat.00{LF}@feat.00 equ 0x2000{LF}GLOBAL _load_config_used{LF}EXTERN __guard_fids_table{LF}EXTERN __guard_fids_count{LF}EXTERN __guard_flags"
+                "CPU X64{LF}BITS 64{LF}DEFAULT REL{LF}GLOBAL @feat.00{LF}@feat.00 equ 0x2000{LF}GLOBAL _load_config_used{LF}GLOBAL __wincmd_cfg_nop"
             );
-            emit_nasm_coff64_fn_global(out, "__wincmd_cfg_nop");
         }
         (BinaryFormat::Coff64, TargetAssembler::Fasm) if fasm_mode == FasmPeMode::Coff64 => {
             let _ = writeln!(
@@ -1762,13 +1768,6 @@ fn emit_include(out: &mut String, path: &str, target: TargetAssembler) {
     }
 }
 
-fn emit_nasm_coff64_fn_global(out: &mut String, symbol: &str) {
-    let _ = writeln!(
-        out,
-        "%if __NASM_MAJOR__ >= 3{LF}GLOBAL {symbol}:function{LF}%else{LF}GLOBAL {symbol}{LF}%endif"
-    );
-}
-
 fn emit_global(
     out: &mut String,
     symbol: &str,
@@ -1785,11 +1784,7 @@ fn emit_global(
     }
     match target {
         TargetAssembler::Nasm => {
-            if module.format == BinaryFormat::Coff64 {
-                emit_nasm_coff64_fn_global(out, symbol);
-            } else {
-                let _ = writeln!(out, "GLOBAL {symbol}");
-            }
+            let _ = writeln!(out, "GLOBAL {symbol}");
         }
         TargetAssembler::Fasm => {
             let is_direct_pe = (module.format == BinaryFormat::Coff64

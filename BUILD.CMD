@@ -170,24 +170,44 @@ IF NOT ERRORLEVEL 1 (
 )
 IF /I "%~1"=="jwasm" GOTO :DONE
 
+WHERE lld-link >NUL 2>NUL
+IF ERRORLEVEL 1 GOTO :AFTER_LLVM
 WHERE llvm-mc >NUL 2>NUL
-IF NOT ERRORLEVEL 1 (
-    WHERE lld-link >NUL 2>NUL
-    IF NOT ERRORLEVEL 1 (
-        IF NOT EXIST "build/llvm/arm32" MKDIR "build/llvm/arm32"
-        IF NOT EXIST "build/llvm/arm64" MKDIR "build/llvm/arm64"
-        llvm-mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I dist/src/llvm-mc/arm32/v7 -filetype=obj dist/src/llvm-mc/arm32/v7/wincmdv7.asm -o build/llvm/arm32/wincmdv7.obj || EXIT /B 1
-        lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm32/wincmdv7.obj build/libs/kernel32_arm32.lib /OUT:build/llvm/arm32/WINCMD_ARM32.EXE || EXIT /B 1
-        llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I dist/src/llvm-mc/arm64 -filetype=obj dist/src/llvm-mc/arm64/wincmda64.asm -o build/llvm/arm64/wincmda64.obj || EXIT /B 1
-        lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm64/wincmda64.obj build/libs/kernel32_arm64.lib /OUT:build/llvm/arm64/WINCMD_ARM64.EXE || EXIT /B 1
-        FOR %%U IN (mem attrib find findstr sort more fc comp tree where xcopy replace robocopy choice timeout truename reg hostname whoami) DO (
-            llvm-mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I dist/src/llvm-mc/arm32/util -filetype=obj dist/src/llvm-mc/arm32/util/%%U.asm -o build/llvm/arm32/u_%%U.obj || EXIT /B 1
-            lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm32/u_%%U.obj build/libs/kernel32_arm32.lib /OUT:build/llvm/arm32/%%U.EXE || EXIT /B 1
-            llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I dist/src/llvm-mc/arm64/util -filetype=obj dist/src/llvm-mc/arm64/util/%%U.asm -o build/llvm/arm64/u_%%U.obj || EXIT /B 1
-            lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm64/u_%%U.obj build/libs/kernel32_arm64.lib /OUT:build/llvm/arm64/%%U.EXE || EXIT /B 1
-        )
-    )
+IF NOT ERRORLEVEL 1 GOTO :BUILD_LLVM_MC
+WHERE clang >NUL 2>NUL
+IF NOT ERRORLEVEL 1 GOTO :BUILD_LLVM_CLANG
+GOTO :AFTER_LLVM
+
+:BUILD_LLVM_MC
+IF NOT EXIST "build/llvm/arm32" MKDIR "build/llvm/arm32"
+IF NOT EXIST "build/llvm/arm64" MKDIR "build/llvm/arm64"
+llvm-mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I dist/src/llvm-mc/arm32/v7 -filetype=obj dist/src/llvm-mc/arm32/v7/wincmdv7.asm -o build/llvm/arm32/wincmdv7.obj || EXIT /B 1
+lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm32/wincmdv7.obj build/libs/kernel32_arm32.lib /OUT:build/llvm/arm32/WINCMD_ARM32.EXE || EXIT /B 1
+llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I dist/src/llvm-mc/arm64 -filetype=obj dist/src/llvm-mc/arm64/wincmda64.asm -o build/llvm/arm64/wincmda64.obj || EXIT /B 1
+lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm64/wincmda64.obj build/libs/kernel32_arm64.lib /OUT:build/llvm/arm64/WINCMD_ARM64.EXE || EXIT /B 1
+FOR %%U IN (mem attrib find findstr sort more fc comp tree where xcopy replace robocopy choice timeout truename reg hostname whoami) DO (
+    llvm-mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I dist/src/llvm-mc/arm32/util -filetype=obj dist/src/llvm-mc/arm32/util/%%U.asm -o build/llvm/arm32/u_%%U.obj || EXIT /B 1
+    lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm32/u_%%U.obj build/libs/kernel32_arm32.lib /OUT:build/llvm/arm32/%%U.EXE || EXIT /B 1
+    llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I dist/src/llvm-mc/arm64/util -filetype=obj dist/src/llvm-mc/arm64/util/%%U.asm -o build/llvm/arm64/u_%%U.obj || EXIT /B 1
+    lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm64/u_%%U.obj build/libs/kernel32_arm64.lib /OUT:build/llvm/arm64/%%U.EXE || EXIT /B 1
 )
+GOTO :AFTER_LLVM
+
+:BUILD_LLVM_CLANG
+IF NOT EXIST "build/llvm/arm32" MKDIR "build/llvm/arm32"
+IF NOT EXIST "build/llvm/arm64" MKDIR "build/llvm/arm64"
+clang -cc1as -triple thumbv7a-pc-windows-msvc -target-feature +hwdiv -I dist/src/llvm-mc/arm32/v7 -filetype obj dist/src/llvm-mc/arm32/v7/wincmdv7.asm -o build/llvm/arm32/wincmdv7.obj || EXIT /B 1
+lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm32/wincmdv7.obj build/libs/kernel32_arm32.lib /OUT:build/llvm/arm32/WINCMD_ARM32.EXE || EXIT /B 1
+clang -cc1as -triple aarch64-pc-windows-msvc -I dist/src/llvm-mc/arm64 -filetype obj dist/src/llvm-mc/arm64/wincmda64.asm -o build/llvm/arm64/wincmda64.obj || EXIT /B 1
+lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm64/wincmda64.obj build/libs/kernel32_arm64.lib /OUT:build/llvm/arm64/WINCMD_ARM64.EXE || EXIT /B 1
+FOR %%U IN (mem attrib find findstr sort more fc comp tree where xcopy replace robocopy choice timeout truename reg hostname whoami) DO (
+    clang -cc1as -triple thumbv7a-pc-windows-msvc -target-feature +hwdiv -I dist/src/llvm-mc/arm32/util -filetype obj dist/src/llvm-mc/arm32/util/%%U.asm -o build/llvm/arm32/u_%%U.obj || EXIT /B 1
+    lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm32/u_%%U.obj build/libs/kernel32_arm32.lib /OUT:build/llvm/arm32/%%U.EXE || EXIT /B 1
+    clang -cc1as -triple aarch64-pc-windows-msvc -I dist/src/llvm-mc/arm64/util -filetype obj dist/src/llvm-mc/arm64/util/%%U.asm -o build/llvm/arm64/u_%%U.obj || EXIT /B 1
+    lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup build/llvm/arm64/u_%%U.obj build/libs/kernel32_arm64.lib /OUT:build/llvm/arm64/%%U.EXE || EXIT /B 1
+)
+
+:AFTER_LLVM
 IF /I "%~1"=="build" GOTO :DONE
 IF /I "%~1"=="package" (
     cargo run --release --quiet -p media-pkg -- --root . --build-dir build --dist-src dist/src --out-dir dist/release || EXIT /B 1

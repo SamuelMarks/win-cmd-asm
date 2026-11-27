@@ -256,6 +256,25 @@ build_x86_64() {
   fi
 }
 
+run_llvm_mc() {
+  if command -v llvm-mc >/dev/null 2>&1; then
+    llvm-mc "$@"
+    return
+  fi
+  local cc1_args=(-cc1as)
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -triple=*) cc1_args+=(-triple "${1#-triple=}") ;;
+      -mattr=*) cc1_args+=(-target-feature "${1#-mattr=}") ;;
+      -filetype=*) cc1_args+=(-filetype "${1#-filetype=}") ;;
+      --fatal-warnings) ;;
+      *) cc1_args+=("$1") ;;
+    esac
+    shift
+  done
+  clang "${cc1_args[@]}"
+}
+
 build_arm32() {
   if has_tc fasmarm; then
     mkdir -p "$BUILD_DIR/fasmarm/arm32"
@@ -269,13 +288,13 @@ build_arm32() {
   fi
   if has_tc llvm; then
     mkdir -p "$BUILD_DIR/llvm/arm32"
-    llvm-mc -triple=armv4t-none-eabi --fatal-warnings -I "$DIST_DIR/llvm-mc/arm32/v4" -filetype=obj "$DIST_DIR/llvm-mc/arm32/v4/wincmdv4.asm" -o "$BUILD_DIR/llvm/arm32/wincmdv4.obj"
-    llvm-mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I "$DIST_DIR/llvm-mc/arm32/v7" -filetype=obj "$DIST_DIR/llvm-mc/arm32/v7/wincmdv7.asm" -o "$BUILD_DIR/llvm/arm32/wincmdv7.obj"
+    run_llvm_mc -triple=armv4t-none-eabi --fatal-warnings -I "$DIST_DIR/llvm-mc/arm32/v4" -filetype=obj "$DIST_DIR/llvm-mc/arm32/v4/wincmdv4.asm" -o "$BUILD_DIR/llvm/arm32/wincmdv4.obj"
+    run_llvm_mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I "$DIST_DIR/llvm-mc/arm32/v7" -filetype=obj "$DIST_DIR/llvm-mc/arm32/v7/wincmdv7.asm" -o "$BUILD_DIR/llvm/arm32/wincmdv7.obj"
     lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup "/MAP:$BUILD_DIR/llvm/arm32/WINCMD_ARM32.MAP" "$BUILD_DIR/llvm/arm32/wincmdv7.obj" "$BUILD_DIR/libs/kernel32_arm32.lib" "/OUT:$BUILD_DIR/llvm/arm32/WINCMD_ARM32.EXE"
     for pair in "${PE_UTILS[@]}"; do
       u_src="${pair%%:*}"
       u_out="${pair##*:}"
-      llvm-mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I "$DIST_DIR/llvm-mc/arm32/util" -filetype=obj "$DIST_DIR/llvm-mc/arm32/util/${u_src}.asm" -o "$BUILD_DIR/llvm/arm32/u_${u_src}.obj"
+      run_llvm_mc -triple=thumbv7a-pc-windows-msvc -mattr=+hwdiv --fatal-warnings -I "$DIST_DIR/llvm-mc/arm32/util" -filetype=obj "$DIST_DIR/llvm-mc/arm32/util/${u_src}.asm" -o "$BUILD_DIR/llvm/arm32/u_${u_src}.obj"
       lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,6.02 /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup "$BUILD_DIR/llvm/arm32/u_${u_src}.obj" "$BUILD_DIR/libs/kernel32_arm32.lib" "/OUT:$BUILD_DIR/llvm/arm32/${u_out}"
     done
   fi
@@ -293,12 +312,12 @@ build_arm64() {
   fi
   if has_tc llvm; then
     mkdir -p "$BUILD_DIR/llvm/arm64"
-    llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I "$DIST_DIR/llvm-mc/arm64" -filetype=obj "$DIST_DIR/llvm-mc/arm64/wincmda64.asm" -o "$BUILD_DIR/llvm/arm64/wincmda64.obj"
+    run_llvm_mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I "$DIST_DIR/llvm-mc/arm64" -filetype=obj "$DIST_DIR/llvm-mc/arm64/wincmda64.asm" -o "$BUILD_DIR/llvm/arm64/wincmda64.obj"
     lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup "/MAP:$BUILD_DIR/llvm/arm64/WINCMD_ARM64.MAP" "$BUILD_DIR/llvm/arm64/wincmda64.obj" "$BUILD_DIR/libs/kernel32_arm64.lib" "/OUT:$BUILD_DIR/llvm/arm64/WINCMD_ARM64.EXE"
     for pair in "${PE_UTILS[@]}"; do
       u_src="${pair%%:*}"
       u_out="${pair##*:}"
-      llvm-mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I "$DIST_DIR/llvm-mc/arm64/util" -filetype=obj "$DIST_DIR/llvm-mc/arm64/util/${u_src}.asm" -o "$BUILD_DIR/llvm/arm64/u_${u_src}.obj"
+      run_llvm_mc -triple=aarch64-pc-windows-msvc --fatal-warnings -I "$DIST_DIR/llvm-mc/arm64/util" -filetype=obj "$DIST_DIR/llvm-mc/arm64/util/${u_src}.asm" -o "$BUILD_DIR/llvm/arm64/u_${u_src}.obj"
       lld-link /WX /NOLOGO /NODEFAULTLIB /BREPRO /STACK:1048576,65536 /SUBSYSTEM:CONSOLE,10.0 /HIGHENTROPYVA /DYNAMICBASE /NXCOMPAT /GUARD:CF /MANIFEST:EMBED /MANIFESTINPUT:asm/x86_64/wincmd64.manifest /ENTRY:mainCRTStartup "$BUILD_DIR/llvm/arm64/u_${u_src}.obj" "$BUILD_DIR/libs/kernel32_arm64.lib" "/OUT:$BUILD_DIR/llvm/arm64/${u_out}"
     done
   fi

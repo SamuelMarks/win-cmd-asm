@@ -223,15 +223,9 @@ fn verify_cfg_load_config(
         "{tc} valid GuardCFCheckFunctionPointer VA"
     );
     assert!(
-        gfids_tbl_va > image_base && gfids_cnt >= 1,
-        "{tc} GuardCFFunctionTable must be populated (cnt={gfids_cnt})"
+        gfids_tbl_va > image_base && gfids_cnt >= 4,
+        "{tc} GuardCFFunctionTable must list >=4 valid indirect targets (cnt={gfids_cnt})"
     );
-    if tc != "nasm" {
-        assert!(
-            gfids_cnt >= 4,
-            "{tc} GuardCFFunctionTable must list >=4 valid indirect targets (cnt={gfids_cnt})"
-        );
-    }
     assert_ne!(
         guard_flags & 0x0500,
         0,

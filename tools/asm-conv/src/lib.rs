@@ -544,9 +544,9 @@ banner_msg:
             let x64 = convert_source("w64.asm", SAMPLE_X64, tgt)?;
             assert!(x64.contains("w64_entry"));
             if tgt == TargetAssembler::Nasm {
-                assert!(x64.contains("%if __NASM_MAJOR__ >= 3"));
-                assert!(x64.contains("GLOBAL w64_entry:function"));
-                assert!(x64.contains("GLOBAL w64_entry\n%endif"));
+                assert!(!x64.contains(":function"));
+                assert!(x64.contains("GLOBAL w64_entry\n"));
+                assert!(x64.contains("__wincmd_gfids_table:\n    dd w64_entry wrt ..imagebase\n    dd __wincmd_cfg_nop wrt ..imagebase"));
             }
         }
 

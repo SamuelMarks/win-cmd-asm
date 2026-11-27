@@ -169,18 +169,20 @@
     b .out
 .hkcr:
     mov_imm32 w0, 0x80000000
-    b .out
+    b .sign_out
 .hkcu:
     mov_imm32 w0, 0x80000001
-    b .out
+    b .sign_out
 .hklm:
     mov_imm32 w0, 0x80000002
-    b .out
+    b .sign_out
 .hku:
     mov_imm32 w0, 0x80000003
-    b .out
+    b .sign_out
 .hkcc:
     mov_imm32 w0, 0x80000005
+.sign_out:
+    sbfx x0, x0, #0, #32
 .out:
     ldp x19, x20, [sp], #16
     ldp x29, x30, [sp], #16

@@ -156,18 +156,23 @@
     @epilog_ret
 .hkcr:
     mov eax, 0x80000000
+    cdqe
     @epilog_ret
 .hkcu:
     mov eax, 0x80000001
+    cdqe
     @epilog_ret
 .hklm:
     mov eax, 0x80000002
+    cdqe
     @epilog_ret
 .hku:
     mov eax, 0x80000003
+    cdqe
     @epilog_ret
 .hkcc:
     mov eax, 0x80000005
+    cdqe
     @epilog_ret
 @endproc
 

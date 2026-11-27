@@ -273,23 +273,63 @@ jobs:
           $tcRoot = Join-Path $env:RUNNER_TEMP 'wincmd-win-tc'
           $tcBin  = Join-Path $tcRoot 'bin'
           New-Item -ItemType Directory -Force -Path $tcBin | Out-Null
+          Add-Content -Path $env:GITHUB_PATH -Value $tcBin
+          $env:PATH = "$tcBin;$env:PATH"
 
           if (Test-Path 'C:\Program Files\LLVM\bin\lld-link.exe') {
             Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
             $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
           }
-          foreach ($llvmCand in @('C:\msys64\clang64\bin', 'C:\msys64\ucrt64\bin', 'C:\msys64\mingw64\bin')) {
-            if ((Test-Path (Join-Path $llvmCand 'llvm-mc.exe')) -and (Test-Path (Join-Path $llvmCand 'llvm-dlltool.exe'))) {
+          $vsLlvmDirs = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin' -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          foreach ($llvmCand in @($vsLlvmDirs + @('C:\msys64\clang64\bin', 'C:\msys64\ucrt64\bin', 'C:\msys64\mingw64\bin'))) {
+            if ($llvmCand -and (Test-Path (Join-Path $llvmCand 'llvm-mc.exe'))) {
               Add-Content -Path $env:GITHUB_PATH -Value $llvmCand
               $env:PATH = "$env:PATH;$llvmCand"
               break
             }
           }
-          $missingLlvm = @('clang', 'lld-link', 'llvm-mc', 'llvm-dlltool') | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) }
-          if ($missingLlvm) {
-            choco install llvm -y --no-progress --force
+          $missingCoreLlvm = @('clang', 'lld-link', 'llvm-dlltool') | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) }
+          if ($missingCoreLlvm) {
+            choco install llvm -y --no-progress
             Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\LLVM\bin'
             $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+          }
+          if (-not (Get-Command llvm-mc -ErrorAction SilentlyContinue)) {
+            $shimSrc = Join-Path $tcRoot 'llvm_mc_shim.rs'
+            $shimExe = Join-Path $tcBin 'llvm-mc.exe'
+            $shimLines = @(
+              'use std::process::{Command, ExitCode};',
+              'fn main() -> ExitCode {',
+              '    let mut out: Vec<String> = vec![String::from("-cc1as")];',
+              '    for arg in std::env::args().skip(1) {',
+              '        if let Some(v) = arg.strip_prefix("-triple=") {',
+              '            out.push(String::from("-triple"));',
+              '            out.push(String::from(v));',
+              '        } else if let Some(v) = arg.strip_prefix("-mattr=") {',
+              '            out.push(String::from("-target-feature"));',
+              '            out.push(String::from(v));',
+              '        } else if let Some(v) = arg.strip_prefix("-filetype=") {',
+              '            out.push(String::from("-filetype"));',
+              '            out.push(String::from(v));',
+              '        } else if arg != "--fatal-warnings" {',
+              '            out.push(arg);',
+              '        }',
+              '    }',
+              '    match Command::new("clang").args(&out).status() {',
+              '        Ok(st) if st.success() => ExitCode::SUCCESS,',
+              '        Ok(_) => ExitCode::FAILURE,',
+              '        Err(e) => {',
+              '            eprintln!("llvm-mc shim failed to invoke clang -cc1as: {e}");',
+              '            ExitCode::FAILURE',
+              '        }',
+              '    }',
+              '}'
+            )
+            Set-Content -Path $shimSrc -Value ($shimLines -join "`n") -Encoding UTF8
+            & rustc --edition=2021 -C opt-level=2 $shimSrc -o $shimExe
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $shimExe)) {
+              throw "Failed to compile llvm-mc -> clang -cc1as shim"
+            }
           }
           foreach ($reqTool in @('clang', 'lld-link', 'llvm-mc', 'llvm-dlltool')) {
             if (-not (Get-Command $reqTool -ErrorAction SilentlyContinue)) {
@@ -377,7 +417,6 @@ jobs:
               & clang -O2 -DNDEBUG -D__NT__ -D_CRT_SECURE_NO_WARNINGS -w -I"$jwSrcDir\H" -I"$jwSrcDir" @cFiles -o (Join-Path $tcBin 'jwasm.exe')
               if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $tcBin 'jwasm.exe'))) { throw "Failed to build jwasm.exe" }
             }
-            Add-Content -Path $env:GITHUB_PATH -Value $tcBin
           }
 
       - name: Setup Cygwin
